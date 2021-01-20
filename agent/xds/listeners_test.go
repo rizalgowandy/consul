@@ -8,7 +8,7 @@ import (
 	"text/template"
 
 	envoy "github.com/envoyproxy/go-control-plane/envoy/api/v2"
-	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+
 	testinf "github.com/mitchellh/go-testing-interface"
 	"github.com/stretchr/testify/require"
 
@@ -88,8 +88,7 @@ func TestListenersFromSnapshot(t *testing.T) {
 			setup: func(snap *proxycfg.ConfigSnapshot) {
 				snap.Proxy.Config["envoy_public_listener_json"] =
 					customListenerJSON(t, customListenerJSONOptions{
-						Name:        "custom-public-listen",
-						IncludeType: false,
+						Name: "custom-public-listen",
 					})
 			},
 		},
@@ -101,18 +100,6 @@ func TestListenersFromSnapshot(t *testing.T) {
 				snap.Proxy.Config["envoy_public_listener_json"] =
 					customHTTPListenerJSON(t, customHTTPListenerJSONOptions{
 						Name: "custom-public-listen",
-					})
-			},
-		},
-		{
-			name:   "custom-public-listener-http-typed",
-			create: proxycfg.TestConfigSnapshot,
-			setup: func(snap *proxycfg.ConfigSnapshot) {
-				snap.Proxy.Config["protocol"] = "http"
-				snap.Proxy.Config["envoy_public_listener_json"] =
-					customHTTPListenerJSON(t, customHTTPListenerJSONOptions{
-						Name:        "custom-public-listen",
-						TypedConfig: true,
 					})
 			},
 		},
@@ -129,39 +116,13 @@ func TestListenersFromSnapshot(t *testing.T) {
 			},
 		},
 		{
-			name:   "custom-public-listener-http-2-typed",
-			create: proxycfg.TestConfigSnapshot,
-			setup: func(snap *proxycfg.ConfigSnapshot) {
-				snap.Proxy.Config["protocol"] = "http"
-				snap.Proxy.Config["envoy_public_listener_json"] =
-					customHTTPListenerJSON(t, customHTTPListenerJSONOptions{
-						Name:                      "custom-public-listen",
-						HTTPConnectionManagerName: httpConnectionManagerNewName,
-						TypedConfig:               true,
-					})
-			},
-		},
-		{
 			name:   "custom-public-listener-http-missing",
 			create: proxycfg.TestConfigSnapshot,
 			setup: func(snap *proxycfg.ConfigSnapshot) {
 				snap.Proxy.Config["protocol"] = "http"
 				snap.Proxy.Config["envoy_public_listener_json"] =
 					customListenerJSON(t, customListenerJSONOptions{
-						Name:        "custom-public-listen",
-						IncludeType: false,
-					})
-			},
-		},
-		{
-			name:               "custom-public-listener-typed",
-			create:             proxycfg.TestConfigSnapshot,
-			overrideGoldenName: "custom-public-listener", // should be the same
-			setup: func(snap *proxycfg.ConfigSnapshot) {
-				snap.Proxy.Config["envoy_public_listener_json"] =
-					customListenerJSON(t, customListenerJSONOptions{
-						Name:        "custom-public-listen",
-						IncludeType: true,
+						Name: "custom-public-listen",
 					})
 			},
 		},
@@ -172,10 +133,9 @@ func TestListenersFromSnapshot(t *testing.T) {
 			setup: func(snap *proxycfg.ConfigSnapshot) {
 				snap.Proxy.Config["envoy_public_listener_json"] =
 					customListenerJSON(t, customListenerJSONOptions{
-						Name:        "custom-public-listen",
-						IncludeType: true,
+						Name: "custom-public-listen",
 						// Attempt to override the TLS context should be ignored
-						TLSContext: `{"requireClientCertificate": false}`,
+						TLSContext: `"allowRenegotiation": false`,
 					})
 			},
 		},
@@ -185,31 +145,17 @@ func TestListenersFromSnapshot(t *testing.T) {
 			setup: func(snap *proxycfg.ConfigSnapshot) {
 				snap.Proxy.Upstreams[0].Config["envoy_listener_json"] =
 					customListenerJSON(t, customListenerJSONOptions{
-						Name:        "custom-upstream",
-						IncludeType: false,
+						Name: "custom-upstream",
 					})
 			},
 		},
 		{
-			name:               "custom-upstream-typed",
-			create:             proxycfg.TestConfigSnapshot,
-			overrideGoldenName: "custom-upstream", // should be the same
-			setup: func(snap *proxycfg.ConfigSnapshot) {
-				snap.Proxy.Upstreams[0].Config["envoy_listener_json"] =
-					customListenerJSON(t, customListenerJSONOptions{
-						Name:        "custom-upstream",
-						IncludeType: true,
-					})
-			},
-		},
-		{
-			name:   "custom-upstream-typed-ignored-with-disco-chain",
+			name:   "custom-upstream-ignored-with-disco-chain",
 			create: proxycfg.TestConfigSnapshotDiscoveryChainWithFailover,
 			setup: func(snap *proxycfg.ConfigSnapshot) {
 				snap.Proxy.Upstreams[0].Config["envoy_listener_json"] =
 					customListenerJSON(t, customListenerJSONOptions{
-						Name:        "custom-upstream",
-						IncludeType: true,
+						Name: "custom-upstream",
 					})
 			},
 		},
@@ -550,7 +496,7 @@ func TestListenersFromSnapshot(t *testing.T) {
 	}
 }
 
-func expectListenerJSONResources(t *testing.T, snap *proxycfg.ConfigSnapshot) map[string]string {
+func expectListenerJSONResources(snap *proxycfg.ConfigSnapshot) map[string]string {
 	return map[string]string{
 		"public_listener": `{
 				"@type": "type.googleapis.com/envoy.api.v2.Listener",
@@ -561,23 +507,26 @@ func expectListenerJSONResources(t *testing.T, snap *proxycfg.ConfigSnapshot) ma
 						"portValue": 9999
 					}
 				},
+				"trafficDirection": "INBOUND",
 				"filterChains": [
 					{
-						"tlsContext": ` + expectedPublicTLSContextJSON(t, snap) + `,
+						"transportSocket": ` + expectedPublicTransportSocketJSON(snap) + `,
 						"filters": [
 							{
 								"name": "envoy.filters.network.rbac",
-								"config": {
+								"typedConfig": {
+									"@type": "type.googleapis.com/envoy.config.filter.network.rbac.v2.RBAC",
 										"rules": {
 											},
-										"stat_prefix": "connect_authz"
+										"statPrefix": "connect_authz"
 									}
 							},
 							{
-								"name": "envoy.tcp_proxy",
-								"config": {
+								"name": "envoy.filters.network.tcp_proxy",
+								"typedConfig": {
+									"@type": "type.googleapis.com/envoy.config.filter.network.tcp_proxy.v2.TcpProxy",
 									"cluster": "local_app",
-									"stat_prefix": "public_listener"
+									"statPrefix": "public_listener"
 								}
 							}
 						]
@@ -593,14 +542,16 @@ func expectListenerJSONResources(t *testing.T, snap *proxycfg.ConfigSnapshot) ma
 					"portValue": 9191
 				}
 			},
+			"trafficDirection": "OUTBOUND",
 			"filterChains": [
 				{
 					"filters": [
 						{
-							"name": "envoy.tcp_proxy",
-							"config": {
+							"name": "envoy.filters.network.tcp_proxy",
+							"typedConfig": {
+								"@type": "type.googleapis.com/envoy.config.filter.network.tcp_proxy.v2.TcpProxy",
 								"cluster": "db.default.dc1.internal.11111111-2222-3333-4444-555555555555.consul",
-								"stat_prefix": "upstream.db.default.dc1"
+								"statPrefix": "upstream.db.default.dc1"
 							}
 						}
 					]
@@ -616,14 +567,16 @@ func expectListenerJSONResources(t *testing.T, snap *proxycfg.ConfigSnapshot) ma
 					"portValue": 8181
 				}
 			},
+			"trafficDirection": "OUTBOUND",
 			"filterChains": [
 				{
 					"filters": [
 						{
-							"name": "envoy.tcp_proxy",
-							"config": {
+							"name": "envoy.filters.network.tcp_proxy",
+							"typedConfig": {
+								"@type": "type.googleapis.com/envoy.config.filter.network.tcp_proxy.v2.TcpProxy",
 								"cluster": "geo-cache.default.dc1.query.11111111-2222-3333-4444-555555555555.consul",
-								"stat_prefix": "upstream.prepared_query_geo-cache"
+								"statPrefix": "upstream.prepared_query_geo-cache"
 							}
 						}
 					]
@@ -659,20 +612,17 @@ func expectListenerJSONFromResources(snap *proxycfg.ConfigSnapshot, v, n uint64,
 		}`
 }
 
-func expectListenerJSON(t *testing.T, snap *proxycfg.ConfigSnapshot, v, n uint64) string {
-	return expectListenerJSONFromResources(snap, v, n, expectListenerJSONResources(t, snap))
+func expectListenerJSON(snap *proxycfg.ConfigSnapshot, v, n uint64) string {
+	return expectListenerJSONFromResources(snap, v, n, expectListenerJSONResources(snap))
 }
 
 type customListenerJSONOptions struct {
-	Name        string
-	IncludeType bool
-	TLSContext  string
+	Name       string
+	TLSContext string
 }
 
 const customListenerJSONTpl = `{
-	{{ if .IncludeType -}}
 	"@type": "type.googleapis.com/envoy.api.v2.Listener",
-	{{- end }}
 	"name": "{{ .Name }}",
 	"address": {
 		"socketAddress": {
@@ -683,14 +633,21 @@ const customListenerJSONTpl = `{
 	"filterChains": [
 		{
 			{{ if .TLSContext -}}
-			"tlsContext": {{ .TLSContext }},
+			"transport_socket": {
+				"name": "tls",
+				"typed_config": {
+					"@type": "type.googleapis.com/envoy.api.v2.auth.UpstreamTlsContext",
+					{{ .TLSContext }}
+				}
+			},
 			{{- end }}
 			"filters": [
 				{
-					"name": "envoy.tcp_proxy",
-					"config": {
+					"name": "envoy.filters.network.tcp_proxy",
+					"typedConfig": {
+						"@type": "type.googleapis.com/envoy.config.filter.network.tcp_proxy.v2.TcpProxy",
 							"cluster": "random-cluster",
-							"stat_prefix": "foo-stats"
+							"statPrefix": "foo-stats"
 						}
 				}
 			]
@@ -701,10 +658,10 @@ const customListenerJSONTpl = `{
 type customHTTPListenerJSONOptions struct {
 	Name                      string
 	HTTPConnectionManagerName string
-	TypedConfig               bool
 }
 
 const customHTTPListenerJSONTpl = `{
+	"@type": "type.googleapis.com/envoy.api.v2.Listener",
 	"name": "{{ .Name }}",
 	"address": {
 		"socketAddress": {
@@ -717,15 +674,11 @@ const customHTTPListenerJSONTpl = `{
 			"filters": [
 				{
 					"name": "{{ .HTTPConnectionManagerName }}",
-					{{ if .TypedConfig -}}
 					"typedConfig": {
 					"@type": "type.googleapis.com/envoy.config.filter.network.http_connection_manager.v2.HttpConnectionManager",
-					{{ else -}}
-					"config": {
-					{{- end }}
 						"http_filters": [
 							{
-								"name": "envoy.router"
+								"name": "envoy.filters.http.router"
 							}
 						],
 						"route_config": {
@@ -771,7 +724,7 @@ func customListenerJSON(t *testing.T, opts customListenerJSONOptions) string {
 func customHTTPListenerJSON(t *testing.T, opts customHTTPListenerJSONOptions) string {
 	t.Helper()
 	if opts.HTTPConnectionManagerName == "" {
-		opts.HTTPConnectionManagerName = wellknown.HTTPConnectionManager
+		opts.HTTPConnectionManagerName = httpConnectionManagerNewName
 	}
 	var buf bytes.Buffer
 	require.NoError(t, customHTTPListenerJSONTemplate.Execute(&buf, opts))

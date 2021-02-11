@@ -168,6 +168,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
 				rt.DataDir = dataDir
+				rt.RPCConfig.EnableStreaming = true
 			},
 			warns: []string{"bootstrap = true: do not enable unless necessary"},
 		},
@@ -184,6 +185,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
 				rt.DataDir = dataDir
+				rt.RPCConfig.EnableStreaming = true
 			},
 			warns: []string{"bootstrap_expect > 0: expecting 3 servers"},
 		},
@@ -331,6 +333,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ConsulServerHealthInterval = 10 * time.Millisecond
 				rt.GRPCPort = 8502
 				rt.GRPCAddrs = []net.Addr{tcpAddr("127.0.0.1:8502")}
+				rt.RPCConfig.EnableStreaming = true
 			},
 		},
 		{
@@ -652,6 +655,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
+				rt.RPCConfig.EnableStreaming = true
 			},
 		},
 		{
@@ -834,6 +838,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
 				rt.DataDir = dataDir
+				rt.RPCConfig.EnableStreaming = true
 			},
 		},
 		{
@@ -1828,6 +1833,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.SkipLeaveOnInt = true
 				rt.DataDir = dataDir
+				rt.RPCConfig.EnableStreaming = true
 			},
 			warns: []string{"BootstrapExpect is set to 1; this is the same as Bootstrap mode.", "bootstrap = true: do not enable unless necessary"},
 		},
@@ -1844,6 +1850,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.SkipLeaveOnInt = true
 				rt.DataDir = dataDir
+				rt.RPCConfig.EnableStreaming = true
 			},
 			warns: []string{
 				`bootstrap_expect = 2: A cluster with 2 servers will provide no failure tolerance. See https://www.consul.io/docs/internals/consensus.html#deployment-table`,
@@ -1863,6 +1870,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.SkipLeaveOnInt = true
 				rt.DataDir = dataDir
+				rt.RPCConfig.EnableStreaming = true
 			},
 			warns: []string{
 				`bootstrap_expect is even number: A cluster with an even number of servers does not achieve optimum fault tolerance. See https://www.consul.io/docs/internals/consensus.html#deployment-table`,
@@ -2818,6 +2826,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
+				rt.RPCConfig.EnableStreaming = true
 			},
 		},
 		{
@@ -2845,6 +2854,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
+				rt.RPCConfig.EnableStreaming = true
 			},
 		},
 		{
@@ -2872,6 +2882,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
+				rt.RPCConfig.EnableStreaming = true
 			},
 		},
 		{
@@ -2896,6 +2907,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
+				rt.RPCConfig.EnableStreaming = true
 			},
 		},
 		{
@@ -2924,10 +2936,12 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 			},
 			json: []string{`{
 			  "use_streaming_backend": true,
+			  "rpc": {"enable_streaming": false},
 			  "server": true
 			}`},
 			hcl: []string{`
 			  use_streaming_backend = true
+			  rpc { enable_streaming = false }
 			  server = true
 			`},
 			warns: []string{"use_streaming_backend = true requires rpc.enable_streaming on servers to work properly"},
@@ -3297,6 +3311,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.LeaveOnTerm = false
 				rt.SkipLeaveOnInt = true
+				rt.RPCConfig.EnableStreaming = true
 			},
 		},
 
@@ -4494,6 +4509,7 @@ func TestBuilder_BuildAndValidate_ConfigFlagsAndEdgecases(t *testing.T) {
 				rt.ServerMode = true
 				rt.SkipLeaveOnInt = true
 				rt.CertFile = "foo"
+				rt.RPCConfig.EnableStreaming = true
 			},
 		},
 		// UI Config tests

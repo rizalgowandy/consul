@@ -21,7 +21,6 @@ import (
 	connlimit "github.com/hashicorp/go-connlimit"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-memdb"
-	"github.com/hashicorp/memberlist"
 	"github.com/hashicorp/raft"
 	autopilot "github.com/hashicorp/raft-autopilot"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
@@ -35,6 +34,7 @@ import (
 	"github.com/hashicorp/consul/agent/consul/fsm"
 	"github.com/hashicorp/consul/agent/consul/state"
 	"github.com/hashicorp/consul/agent/consul/usagemetrics"
+	"github.com/hashicorp/consul/agent/consul/wanfed"
 	agentgrpc "github.com/hashicorp/consul/agent/grpc"
 	"github.com/hashicorp/consul/agent/metadata"
 	"github.com/hashicorp/consul/agent/pool"
@@ -43,6 +43,7 @@ import (
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/agent/token"
 	"github.com/hashicorp/consul/lib"
+	"github.com/hashicorp/consul/lib/routine"
 	"github.com/hashicorp/consul/logging"
 	"github.com/hashicorp/consul/proto/pbsubscribe"
 	"github.com/hashicorp/consul/tlsutil"
@@ -101,6 +102,7 @@ const (
 	aclTokenReapingRoutineName            = "acl token reaping"
 	aclUpgradeRoutineName                 = "legacy ACL token upgrade"
 	caRootPruningRoutineName              = "CA root pruning"
+	caRootMetricRoutineName               = "CA root expiration metric"
 	configReplicationRoutineName          = "config entry replication"
 	federationStateReplicationRoutineName = "federation state replication"
 	federationStateAntiEntropyRoutineName = "federation state anti-entropy"
@@ -251,7 +253,7 @@ type Server struct {
 	// serfWAN is the Serf cluster maintained between DC's
 	// which SHOULD only consist of Consul servers
 	serfWAN                *serf.Serf
-	memberlistTransportWAN memberlist.IngestionAwareTransport
+	memberlistTransportWAN wanfed.IngestionAwareTransport
 	gatewayLocator         *GatewayLocator
 
 	// serverLookup tracks server consuls in the local datacenter.
@@ -298,7 +300,7 @@ type Server struct {
 	dcSupportsIntentionsAsConfigEntries int32
 
 	// Manager to handle starting/stopping go routines when establishing/revoking raft leadership
-	leaderRoutineManager *LeaderRoutineManager
+	leaderRoutineManager *routine.Manager
 
 	// embedded struct to hold all the enterprise specific data
 	EnterpriseServer
@@ -375,7 +377,7 @@ func NewServer(config *Config, flat Deps) (*Server, error) {
 		tombstoneGC:             gc,
 		serverLookup:            NewServerLookup(),
 		shutdownCh:              shutdownCh,
-		leaderRoutineManager:    NewLeaderRoutineManager(logger),
+		leaderRoutineManager:    routine.NewManager(logger.Named(logging.Leader)),
 		aclAuthMethodValidators: authmethod.NewCache(),
 		fsm:                     newFSMFromConfig(flat.Logger, gc, config),
 	}
@@ -391,7 +393,7 @@ func NewServer(config *Config, flat Deps) (*Server, error) {
 	}
 
 	// Initialize enterprise specific server functionality
-	if err := s.initEnterprise(); err != nil {
+	if err := s.initEnterprise(flat); err != nil {
 		s.Shutdown()
 		return nil, err
 	}
@@ -400,7 +402,7 @@ func NewServer(config *Config, flat Deps) (*Server, error) {
 
 	configReplicatorConfig := ReplicatorConfig{
 		Name:     logging.ConfigEntry,
-		Delegate: &FunctionReplicator{ReplicateFn: s.replicateConfig},
+		Delegate: &FunctionReplicator{ReplicateFn: s.replicateConfig, Name: "config-entries"},
 		Rate:     s.config.ConfigReplicationRate,
 		Burst:    s.config.ConfigReplicationBurst,
 		Logger:   s.logger,
@@ -443,6 +445,7 @@ func NewServer(config *Config, flat Deps) (*Server, error) {
 		AutoDisable: false,
 		Logger:      logger,
 		ACLConfig:   s.aclConfig,
+		Tokens:      flat.Tokens,
 	}
 	// Initialize the ACL resolver.
 	if s.acls, err = NewACLResolver(&aclConfig); err != nil {
@@ -499,7 +502,7 @@ func NewServer(config *Config, flat Deps) (*Server, error) {
 
 		// This is always a *memberlist.NetTransport or something which wraps
 		// it which satisfies this interface.
-		s.memberlistTransportWAN = config.SerfWANConfig.MemberlistConfig.Transport.(memberlist.IngestionAwareTransport)
+		s.memberlistTransportWAN = config.SerfWANConfig.MemberlistConfig.Transport.(wanfed.IngestionAwareTransport)
 
 		// See big comment above why we are doing this.
 		if serfBindPortWAN == 0 {
@@ -567,7 +570,15 @@ func NewServer(config *Config, flat Deps) (*Server, error) {
 			WithStateProvider(s.fsm).
 			WithLogger(s.logger).
 			WithDatacenter(s.config.Datacenter).
-			WithReportingInterval(s.config.MetricsReportingInterval),
+			WithReportingInterval(s.config.MetricsReportingInterval).
+			WithGetMembersFunc(func() []serf.Member {
+				members, err := s.LANMembersAllSegments()
+				if err != nil {
+					return []serf.Member{}
+				}
+
+				return members
+			}),
 	)
 	if err != nil {
 		s.Shutdown()
@@ -1136,7 +1147,7 @@ func (s *Server) LANMembers() []serf.Member {
 	return s.serfLAN.Members()
 }
 
-// WANMembers is used to return the members of the LAN cluster
+// WANMembers is used to return the members of the WAN cluster
 func (s *Server) WANMembers() []serf.Member {
 	if s.serfWAN == nil {
 		return nil
@@ -1318,6 +1329,10 @@ func (s *Server) RegisterEndpoint(name string, handler interface{}) error {
 	return s.rpcServer.RegisterName(name, handler)
 }
 
+func (s *Server) FSM() *fsm.FSM {
+	return s.fsm
+}
+
 // Stats is used to return statistics for debugging and insight
 // for various sub-systems
 func (s *Server) Stats() map[string]map[string]string {
@@ -1352,16 +1367,6 @@ func (s *Server) Stats() map[string]map[string]string {
 		stats["serf_wan"] = s.serfWAN.Stats()
 	}
 
-	for outerKey, outerValue := range s.enterpriseStats() {
-		if _, ok := stats[outerKey]; ok {
-			for innerKey, innerValue := range outerValue {
-				stats[outerKey][innerKey] = innerValue
-			}
-		} else {
-			stats[outerKey] = outerValue
-		}
-	}
-
 	return stats
 }
 
@@ -1386,6 +1391,13 @@ func (s *Server) GetLANCoordinate() (lib.CoordinateSet, error) {
 // ReloadConfig is used to have the Server do an online reload of
 // relevant configuration information
 func (s *Server) ReloadConfig(config ReloadableConfig) error {
+	// Reload raft config first before updating any other state since it could
+	// error if the new config is invalid.
+	raftCfg := computeRaftReloadableConfig(config)
+	if err := s.raft.ReloadConfig(raftCfg); err != nil {
+		return err
+	}
+
 	s.rpcLimiter.Store(rate.NewLimiter(config.RPCRateLimit, config.RPCMaxBurst))
 	s.rpcConnLimiter.SetConfig(connlimit.Config{
 		MaxConnsPerClientIP: config.RPCMaxConnsPerClient,
@@ -1398,6 +1410,33 @@ func (s *Server) ReloadConfig(config ReloadableConfig) error {
 	}
 
 	return nil
+}
+
+// computeRaftReloadableConfig works out the correct reloadable config for raft.
+// We reload raft even if nothing has changed since it's cheap and simpler than
+// trying to work out if it's different from the current raft config. This
+// function is separate to make it cheap to table test thoroughly without a full
+// raft instance.
+func computeRaftReloadableConfig(config ReloadableConfig) raft.ReloadableConfig {
+	// We use the raw defaults _not_ the current values so that you can reload
+	// back to a zero value having previously started Consul with a custom value
+	// for one of these fields.
+	defaultConf := DefaultConfig()
+	raftCfg := raft.ReloadableConfig{
+		TrailingLogs:      defaultConf.RaftConfig.TrailingLogs,
+		SnapshotInterval:  defaultConf.RaftConfig.SnapshotInterval,
+		SnapshotThreshold: defaultConf.RaftConfig.SnapshotThreshold,
+	}
+	if config.RaftSnapshotThreshold != 0 {
+		raftCfg.SnapshotThreshold = uint64(config.RaftSnapshotThreshold)
+	}
+	if config.RaftSnapshotInterval != 0 {
+		raftCfg.SnapshotInterval = config.RaftSnapshotInterval
+	}
+	if config.RaftTrailingLogs != 0 {
+		raftCfg.TrailingLogs = uint64(config.RaftTrailingLogs)
+	}
+	return raftCfg
 }
 
 // Atomically sets a readiness state flag when leadership is obtained, to indicate that server is past its barrier write

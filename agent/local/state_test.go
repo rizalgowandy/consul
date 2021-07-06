@@ -1768,33 +1768,38 @@ func TestAgentAntiEntropy_NodeInfo(t *testing.T) {
 	}
 }
 
-func TestAgent_ServiceTokens(t *testing.T) {
-	t.Parallel()
-
+func TestState_ServiceTokens(t *testing.T) {
 	tokens := new(token.Store)
-	tokens.UpdateUserToken("default", token.TokenSourceConfig)
-	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy"`)
+	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy" node_name = "dummy"`)
 	l := local.NewState(agent.LocalConfig(cfg), nil, tokens)
 	l.TriggerSyncChanges = func() {}
 
-	l.AddService(&structs.NodeService{ID: "redis"}, "")
+	id := structs.NewServiceID("redis", nil)
 
-	// Returns default when no token is set
-	if token := l.ServiceToken(structs.NewServiceID("redis", nil)); token != "default" {
-		t.Fatalf("bad: %s", token)
-	}
+	t.Run("defaults to empty string", func(t *testing.T) {
+		require.Equal(t, "", l.ServiceToken(id))
+	})
 
-	// Returns configured token
-	l.AddService(&structs.NodeService{ID: "redis"}, "abc123")
-	if token := l.ServiceToken(structs.NewServiceID("redis", nil)); token != "abc123" {
-		t.Fatalf("bad: %s", token)
-	}
+	t.Run("empty string when there is no token", func(t *testing.T) {
+		err := l.AddService(&structs.NodeService{ID: "redis"}, "")
+		require.NoError(t, err)
 
-	// Keeps token around for the delete
-	l.RemoveService(structs.NewServiceID("redis", nil))
-	if token := l.ServiceToken(structs.NewServiceID("redis", nil)); token != "abc123" {
-		t.Fatalf("bad: %s", token)
-	}
+		require.Equal(t, "", l.ServiceToken(id))
+	})
+
+	t.Run("returns configured token", func(t *testing.T) {
+		err := l.AddService(&structs.NodeService{ID: "redis"}, "abc123")
+		require.NoError(t, err)
+
+		require.Equal(t, "abc123", l.ServiceToken(id))
+	})
+
+	t.Run("RemoveCheck keeps token around for the delete", func(t *testing.T) {
+		err := l.RemoveService(structs.NewServiceID("redis", nil))
+		require.NoError(t, err)
+
+		require.Equal(t, "abc123", l.ServiceToken(id))
+	})
 }
 
 func loadRuntimeConfig(t *testing.T, hcl string) *config.RuntimeConfig {
@@ -1805,37 +1810,43 @@ func loadRuntimeConfig(t *testing.T, hcl string) *config.RuntimeConfig {
 	return result.RuntimeConfig
 }
 
-func TestAgent_CheckTokens(t *testing.T) {
-	t.Parallel()
-
+func TestState_CheckTokens(t *testing.T) {
 	tokens := new(token.Store)
-	tokens.UpdateUserToken("default", token.TokenSourceConfig)
-	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy"`)
+	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy" node_name = "dummy"`)
 	l := local.NewState(agent.LocalConfig(cfg), nil, tokens)
 	l.TriggerSyncChanges = func() {}
 
-	// Returns default when no token is set
-	l.AddCheck(&structs.HealthCheck{CheckID: types.CheckID("mem")}, "")
-	if token := l.CheckToken(structs.NewCheckID("mem", nil)); token != "default" {
-		t.Fatalf("bad: %s", token)
-	}
+	id := structs.NewCheckID("mem", nil)
 
-	// Returns configured token
-	l.AddCheck(&structs.HealthCheck{CheckID: types.CheckID("mem")}, "abc123")
-	if token := l.CheckToken(structs.NewCheckID("mem", nil)); token != "abc123" {
-		t.Fatalf("bad: %s", token)
-	}
+	t.Run("defaults to empty string", func(t *testing.T) {
+		require.Equal(t, "", l.CheckToken(id))
+	})
 
-	// Keeps token around for the delete
-	l.RemoveCheck(structs.NewCheckID("mem", nil))
-	if token := l.CheckToken(structs.NewCheckID("mem", nil)); token != "abc123" {
-		t.Fatalf("bad: %s", token)
-	}
+	t.Run("empty string when there is no token", func(t *testing.T) {
+		err := l.AddCheck(&structs.HealthCheck{CheckID: "mem"}, "")
+		require.NoError(t, err)
+
+		require.Equal(t, "", l.CheckToken(id))
+	})
+
+	t.Run("returns configured token", func(t *testing.T) {
+		err := l.AddCheck(&structs.HealthCheck{CheckID: "mem"}, "abc123")
+		require.NoError(t, err)
+
+		require.Equal(t, "abc123", l.CheckToken(id))
+	})
+
+	t.Run("RemoveCheck keeps token around for the delete", func(t *testing.T) {
+		err := l.RemoveCheck(structs.NewCheckID("mem", nil))
+		require.NoError(t, err)
+
+		require.Equal(t, "abc123", l.CheckToken(id))
+	})
 }
 
 func TestAgent_CheckCriticalTime(t *testing.T) {
 	t.Parallel()
-	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy"`)
+	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy" node_name = "dummy"`)
 	l := local.NewState(agent.LocalConfig(cfg), nil, new(token.Store))
 	l.TriggerSyncChanges = func() {}
 
@@ -1899,7 +1910,7 @@ func TestAgent_CheckCriticalTime(t *testing.T) {
 
 func TestAgent_AddCheckFailure(t *testing.T) {
 	t.Parallel()
-	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy"`)
+	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy" node_name = "dummy"`)
 	l := local.NewState(agent.LocalConfig(cfg), nil, new(token.Store))
 	l.TriggerSyncChanges = func() {}
 
@@ -1922,7 +1933,7 @@ func TestAgent_AliasCheck(t *testing.T) {
 	t.Parallel()
 
 	require := require.New(t)
-	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy"`)
+	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy" node_name = "dummy"`)
 	l := local.NewState(agent.LocalConfig(cfg), nil, new(token.Store))
 	l.TriggerSyncChanges = func() {}
 
@@ -1973,7 +1984,7 @@ func TestAgent_AliasCheck_ServiceNotification(t *testing.T) {
 	t.Parallel()
 
 	require := require.New(t)
-	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy"`)
+	cfg := loadRuntimeConfig(t, `bind_addr = "127.0.0.1" data_dir = "dummy" node_name = "dummy"`)
 	l := local.NewState(agent.LocalConfig(cfg), nil, new(token.Store))
 	l.TriggerSyncChanges = func() {}
 

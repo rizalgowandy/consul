@@ -1,8 +1,10 @@
 package checks
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
+	http2 "golang.org/x/net/http2"
 	"io"
 	"io/ioutil"
 	"net"
@@ -502,6 +504,102 @@ func (c *CheckHTTP) check() {
 		// CRITICAL
 		c.StatusHandler.updateCheck(c.CheckID, api.HealthCritical, result)
 	}
+}
+
+type CheckH2PING struct {
+	CheckID         structs.CheckID
+	ServiceID       structs.ServiceID
+	H2PING          string
+	Interval        time.Duration
+	Timeout         time.Duration
+	Logger          hclog.Logger
+	TLSClientConfig *tls.Config
+	StatusHandler   *StatusHandler
+
+	stop     bool
+	stopCh   chan struct{}
+	stopLock sync.Mutex
+	stopWg   sync.WaitGroup
+}
+
+func shutdownHTTP2ClientConn(clientConn *http2.ClientConn, timeout time.Duration, checkIDString string, logger hclog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout/2)
+	defer cancel()
+	err := clientConn.Shutdown(ctx)
+	if err != nil {
+		logger.Warn("Shutdown of H2Ping check client connection gave an error",
+			"check", checkIDString,
+			"error", err)
+	}
+}
+
+func (c *CheckH2PING) check() {
+	t := &http2.Transport{
+		TLSClientConfig: c.TLSClientConfig,
+	}
+	target := c.H2PING
+	conn, err := tls.Dial("tcp", target, c.TLSClientConfig)
+	if err != nil {
+		message := fmt.Sprintf("Failed to dial to %s: %s", target, err)
+		c.StatusHandler.updateCheck(c.CheckID, api.HealthCritical, message)
+		return
+	}
+	defer conn.Close()
+	clientConn, err := t.NewClientConn(conn)
+	if err != nil {
+		message := fmt.Sprintf("Failed to create client connection %s", err)
+		c.StatusHandler.updateCheck(c.CheckID, api.HealthCritical, message)
+		return
+	}
+	defer shutdownHTTP2ClientConn(clientConn, c.Timeout, c.CheckID.String(), c.Logger)
+	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
+	defer cancel()
+	err = clientConn.Ping(ctx)
+	if err == nil {
+		c.StatusHandler.updateCheck(c.CheckID, api.HealthPassing, "HTTP2 ping was successful")
+	} else {
+		message := fmt.Sprintf("HTTP2 ping failed: %s", err)
+		c.StatusHandler.updateCheck(c.CheckID, api.HealthCritical, message)
+	}
+}
+
+// Stop is used to stop an H2PING check.
+func (c *CheckH2PING) Stop() {
+	c.stopLock.Lock()
+	defer c.stopLock.Unlock()
+	if !c.stop {
+		c.stop = true
+		close(c.stopCh)
+	}
+	c.stopWg.Wait()
+}
+
+func (c *CheckH2PING) run() {
+	defer c.stopWg.Done()
+	// Get the randomized initial pause time
+	initialPauseTime := lib.RandomStagger(c.Interval)
+	next := time.After(initialPauseTime)
+	for {
+		select {
+		case <-next:
+			c.check()
+			next = time.After(c.Interval)
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
+func (c *CheckH2PING) Start() {
+	c.stopLock.Lock()
+	defer c.stopLock.Unlock()
+	if c.Timeout <= 0 {
+		c.Timeout = 10 * time.Second
+	}
+	c.stop = false
+	c.stopCh = make(chan struct{})
+	c.stopWg.Add(1)
+	go c.run()
 }
 
 // CheckTCP is used to periodically make an TCP/UDP connection to

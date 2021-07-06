@@ -1,6 +1,7 @@
 package proxycfg
 
 import (
+	"context"
 	"path"
 	"testing"
 	"time"
@@ -106,6 +107,11 @@ func TestManager_BasicLifecycle(t *testing.T) {
 			},
 		)
 	}
+
+	upstreams := structs.TestUpstreams(t)
+	for i := range upstreams {
+		upstreams[i].DestinationNamespace = structs.IntentionDefaultNamespace
+	}
 	webProxy := &structs.NodeService{
 		Kind:    structs.ServiceKindConnectProxy,
 		ID:      "web-sidecar-proxy",
@@ -120,7 +126,7 @@ func TestManager_BasicLifecycle(t *testing.T) {
 			Config: map[string]interface{}{
 				"foo": "bar",
 			},
-			Upstreams: structs.TestUpstreams(t),
+			Upstreams: upstreams,
 		},
 	}
 
@@ -184,6 +190,8 @@ func TestManager_BasicLifecycle(t *testing.T) {
 		EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
 	})
 
+	db := structs.NewServiceName("db", nil)
+
 	// Create test cases using some of the common data above.
 	tests := []*testcase_BasicLifecycle{
 		{
@@ -211,18 +219,25 @@ func TestManager_BasicLifecycle(t *testing.T) {
 					ConfigSnapshotUpstreams: ConfigSnapshotUpstreams{
 						Leaf: leaf,
 						DiscoveryChain: map[string]*structs.CompiledDiscoveryChain{
-							"db": dbDefaultChain(),
+							db.String(): dbDefaultChain(),
 						},
-						WatchedUpstreams: nil, // Clone() clears this out
+						WatchedDiscoveryChains: map[string]context.CancelFunc{},
+						WatchedUpstreams:       nil, // Clone() clears this out
 						WatchedUpstreamEndpoints: map[string]map[string]structs.CheckServiceNodes{
-							"db": {
+							db.String(): {
 								"db.default.dc1": TestUpstreamNodes(t),
 							},
 						},
 						WatchedGateways: nil, // Clone() clears this out
 						WatchedGatewayEndpoints: map[string]map[string]structs.CheckServiceNodes{
-							"db": {},
+							db.String(): {},
 						},
+						UpstreamConfig: map[string]*structs.Upstream{
+							upstreams[0].Identifier(): &upstreams[0],
+							upstreams[1].Identifier(): &upstreams[1],
+							upstreams[2].Identifier(): &upstreams[2],
+						},
+						PassthroughUpstreams: map[string]ServicePassthroughAddrs{},
 					},
 					PreparedQueryEndpoints: map[string]structs.CheckServiceNodes{},
 					WatchedServiceChecks:   map[structs.ServiceID][]structs.CheckType{},
@@ -260,19 +275,26 @@ func TestManager_BasicLifecycle(t *testing.T) {
 					ConfigSnapshotUpstreams: ConfigSnapshotUpstreams{
 						Leaf: leaf,
 						DiscoveryChain: map[string]*structs.CompiledDiscoveryChain{
-							"db": dbSplitChain(),
+							db.String(): dbSplitChain(),
 						},
-						WatchedUpstreams: nil, // Clone() clears this out
+						WatchedDiscoveryChains: map[string]context.CancelFunc{},
+						WatchedUpstreams:       nil, // Clone() clears this out
 						WatchedUpstreamEndpoints: map[string]map[string]structs.CheckServiceNodes{
-							"db": {
+							db.String(): {
 								"v1.db.default.dc1": TestUpstreamNodes(t),
 								"v2.db.default.dc1": TestUpstreamNodesAlternate(t),
 							},
 						},
 						WatchedGateways: nil, // Clone() clears this out
 						WatchedGatewayEndpoints: map[string]map[string]structs.CheckServiceNodes{
-							"db": {},
+							db.String(): {},
 						},
+						UpstreamConfig: map[string]*structs.Upstream{
+							upstreams[0].Identifier(): &upstreams[0],
+							upstreams[1].Identifier(): &upstreams[1],
+							upstreams[2].Identifier(): &upstreams[2],
+						},
+						PassthroughUpstreams: map[string]ServicePassthroughAddrs{},
 					},
 					PreparedQueryEndpoints: map[string]structs.CheckServiceNodes{},
 					WatchedServiceChecks:   map[structs.ServiceID][]structs.CheckType{},
@@ -334,10 +356,7 @@ func testManager_BasicLifecycle(
 	require := require.New(t)
 	logger := testutil.Logger(t)
 	state := local.NewState(local.Config{}, logger, &token.Store{})
-	source := &structs.QuerySource{
-		Node:       "node1",
-		Datacenter: "dc1",
-	}
+	source := &structs.QuerySource{Datacenter: "dc1"}
 
 	// Stub state syncing
 	state.TriggerSyncChanges = func() {}

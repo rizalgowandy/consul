@@ -15,7 +15,7 @@ const (
 	maxIntentionTxnSize = raftWarnSize / 4
 )
 
-func (s *Server) startIntentionConfigEntryMigration() error {
+func (s *Server) startIntentionConfigEntryMigration(ctx context.Context) error {
 	if !s.config.ConnectEnabled {
 		return nil
 	}
@@ -56,14 +56,14 @@ func (s *Server) startIntentionConfigEntryMigration() error {
 		}
 
 		// When running in the primary we do all of the real work.
-		s.leaderRoutineManager.Start(intentionMigrationRoutineName, s.legacyIntentionMigration)
+		s.leaderRoutineManager.Start(ctx, intentionMigrationRoutineName, s.legacyIntentionMigration)
 	} else {
 		// When running in the secondary we mostly just wait until the
 		// primary finishes, and then wait until we're pretty sure the main
 		// config entry replication thread has seen all of the
 		// migration-related config entry edits before zeroing OUR copy of
 		// the old intentions table.
-		s.leaderRoutineManager.Start(intentionMigrationRoutineName, s.legacyIntentionMigrationInSecondaryDC)
+		s.leaderRoutineManager.Start(ctx, intentionMigrationRoutineName, s.legacyIntentionMigrationInSecondaryDC)
 	}
 
 	return nil
@@ -164,10 +164,8 @@ func (s *Server) legacyIntentionsMigrationCleanupPhase(quiet bool) error {
 	req := structs.IntentionRequest{
 		Op: structs.IntentionOpDeleteAll,
 	}
-	if resp, err := s.raftApply(structs.IntentionRequestType, req); err != nil {
+	if _, err := s.raftApply(structs.IntentionRequestType, req); err != nil {
 		return err
-	} else if respErr, ok := resp.(error); ok {
-		return respErr
 	}
 
 	// Bypass the serf component and jump right to the final state.
@@ -409,9 +407,6 @@ func (s *Server) replicateLegacyIntentionsOnce(ctx context.Context, lastFetchInd
 		resp, err := s.raftApply(structs.TxnRequestType, &txnReq)
 		if err != nil {
 			return 0, false, err
-		}
-		if respErr, ok := resp.(error); ok {
-			return 0, false, respErr
 		}
 
 		if txnResp, ok := resp.(structs.TxnResponse); ok {

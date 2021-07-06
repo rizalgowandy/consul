@@ -187,6 +187,7 @@ type Config struct {
 	HTTPConfig                       HTTPConfig          `mapstructure:"http_config"`
 	KeyFile                          *string             `mapstructure:"key_file"`
 	LeaveOnTerm                      *bool               `mapstructure:"leave_on_terminate"`
+	LicensePath                      *string             `mapstructure:"license_path"`
 	Limits                           Limits              `mapstructure:"limits"`
 	LogLevel                         *string             `mapstructure:"log_level"`
 	LogJSON                          *bool               `mapstructure:"log_json"`
@@ -282,13 +283,19 @@ type Config struct {
 	VersionPrerelease          *string  `mapstructure:"version_prerelease"`
 
 	// Enterprise Only
-	Audit *Audit `mapstructure:"audit"`
+	Audit Audit `mapstructure:"audit"`
 	// Enterprise Only
 	ReadReplica *bool `mapstructure:"read_replica" alias:"non_voting_server"`
 	// Enterprise Only
 	SegmentName *string `mapstructure:"segment"`
 	// Enterprise Only
 	Segments []Segment `mapstructure:"segments"`
+
+	// Enterprise Only - not user configurable
+	LicensePollBaseTime   *string `mapstructure:"license_poll_base_time"`
+	LicensePollMaxTime    *string `mapstructure:"license_poll_max_time"`
+	LicenseUpdateBaseTime *string `mapstructure:"license_update_base_time"`
+	LicenseUpdateMaxTime  *string `mapstructure:"license_update_max_time"`
 }
 
 type GossipLANConfig struct {
@@ -375,6 +382,7 @@ type ServiceDefinition struct {
 	TaggedAddresses   map[string]ServiceAddress `mapstructure:"tagged_addresses"`
 	Meta              map[string]string         `mapstructure:"meta"`
 	Port              *int                      `mapstructure:"port"`
+	SocketPath        *string                   `mapstructure:"socket_path"`
 	Check             *CheckDefinition          `mapstructure:"check"`
 	Checks            []CheckDefinition         `mapstructure:"checks"`
 	Token             *string                   `mapstructure:"token"`
@@ -405,11 +413,13 @@ type CheckDefinition struct {
 	Shell                          *string             `mapstructure:"shell"`
 	GRPC                           *string             `mapstructure:"grpc"`
 	GRPCUseTLS                     *bool               `mapstructure:"grpc_use_tls"`
+	TLSServerName                  *string             `mapstructure:"tls_server_name"`
 	TLSSkipVerify                  *bool               `mapstructure:"tls_skip_verify" alias:"tlsskipverify"`
 	AliasNode                      *string             `mapstructure:"alias_node"`
 	AliasService                   *string             `mapstructure:"alias_service"`
 	Timeout                        *string             `mapstructure:"timeout"`
 	TTL                            *string             `mapstructure:"ttl"`
+	H2PING                         *string             `mapstructure:"h2ping"`
 	SuccessBeforePassing           *int                `mapstructure:"success_before_passing"`
 	FailuresBeforeCritical         *int                `mapstructure:"failures_before_critical"`
 	DeregisterCriticalServiceAfter *string             `mapstructure:"deregister_critical_service_after" alias:"deregistercriticalserviceafter"`
@@ -459,6 +469,16 @@ type ServiceProxy struct {
 	// (DestinationServiceID is set) but otherwise will be ignored.
 	LocalServicePort *int `mapstructure:"local_service_port"`
 
+	// LocalServiceSocketPath is the socket of the local service instance. It is optional
+	// and should only be specified for "side-car" style proxies.
+	LocalServiceSocketPath string `mapstructure:"local_service_socket_path"`
+
+	// TransparentProxy configuration.
+	TransparentProxy *TransparentProxyConfig `mapstructure:"transparent_proxy"`
+
+	// Mode represents how the proxy's inbound and upstream listeners are dialed.
+	Mode *string `mapstructure:"mode"`
+
 	// Config is the arbitrary configuration data provided with the proxy
 	// registration.
 	Config map[string]interface{} `mapstructure:"config"`
@@ -495,13 +515,20 @@ type Upstream struct {
 	// datacenter.
 	Datacenter *string `mapstructure:"datacenter"`
 
+	// It would be worth thinking about a separate structure for these four items,
+	// unifying under address as something like "unix:/tmp/foo", "tcp:localhost:80" could make sense
 	// LocalBindAddress is the ip address a side-car proxy should listen on for
-	// traffic destined for this upstream service. Default if empty is 127.0.0.1.
+	// traffic destined for this upstream service. Default if empty and local bind socket
+	// is not present is 127.0.0.1.
 	LocalBindAddress *string `mapstructure:"local_bind_address"`
 
 	// LocalBindPort is the ip address a side-car proxy should listen on for traffic
 	// destined for this upstream service. Required.
 	LocalBindPort *int `mapstructure:"local_bind_port"`
+
+	// These are exclusive with LocalBindAddress/LocalBindPort. These are created under our control.
+	LocalBindSocketPath *string `mapstructure:"local_bind_socket_path"`
+	LocalBindSocketMode *string `mapstructure:"local_bind_socket_mode"`
 
 	// Config is an opaque config that is specific to the proxy process being run.
 	// It can be used to pass arbitrary configuration for this specific upstream
@@ -515,6 +542,16 @@ type Upstream struct {
 type MeshGatewayConfig struct {
 	// Mesh Gateway Mode
 	Mode *string `mapstructure:"mode"`
+}
+
+type TransparentProxyConfig struct {
+	// The port of the listener where outbound application traffic is being redirected to.
+	OutboundListenerPort *int `mapstructure:"outbound_listener_port"`
+
+	// DialedDirectly indicates whether transparent proxies can dial this proxy instance directly.
+	// The discovery chain is not considered when dialing a service instance directly.
+	// This setting is useful when addressing stateful services, such as a database cluster with a leader node.
+	DialedDirectly *bool `mapstructure:"dialed_directly"`
 }
 
 // ExposeConfig describes HTTP paths to expose through Envoy outside of Connect.
@@ -736,7 +773,6 @@ type Audit struct {
 
 // AuditSink can be provided multiple times to define pipelines for auditing
 type AuditSink struct {
-	Name              *string `mapstructure:"name"`
 	Type              *string `mapstructure:"type"`
 	Format            *string `mapstructure:"format"`
 	Path              *string `mapstructure:"path"`

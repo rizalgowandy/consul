@@ -518,25 +518,24 @@ func (c *ConnectCALeaf) generateNewLeaf(req *ConnectCALeafRequest,
 
 	// Build the cert uri
 	var id connect.CertURI
-	var commonName string
 	var dnsNames []string
 	var ipAddresses []net.IP
 	if req.Service != "" {
 		id = &connect.SpiffeIDService{
 			Host:       roots.TrustDomain,
 			Datacenter: req.Datacenter,
+			Partition:  req.TargetPartition(),
 			Namespace:  req.TargetNamespace(),
 			Service:    req.Service,
 		}
-		commonName = connect.ServiceCN(req.Service, req.TargetNamespace(), roots.TrustDomain)
 		dnsNames = append(dnsNames, req.DNSSAN...)
 	} else if req.Agent != "" {
 		id = &connect.SpiffeIDAgent{
 			Host:       roots.TrustDomain,
 			Datacenter: req.Datacenter,
+			Partition:  req.TargetPartition(),
 			Agent:      req.Agent,
 		}
-		commonName = connect.AgentCN(req.Agent, roots.TrustDomain)
 		dnsNames = append([]string{"localhost"}, req.DNSSAN...)
 		ipAddresses = append([]net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}, req.IPSAN...)
 	} else {
@@ -561,7 +560,7 @@ func (c *ConnectCALeaf) generateNewLeaf(req *ConnectCALeafRequest,
 	}
 
 	// Create a CSR.
-	csr, err := connect.CreateCSR(id, commonName, pk, dnsNames, ipAddresses)
+	csr, err := connect.CreateCSR(id, pk, dnsNames, ipAddresses)
 	if err != nil {
 		return result, err
 	}
@@ -677,6 +676,10 @@ func (r *ConnectCALeafRequest) Key() string {
 	// no cache for this request so the request is forwarded directly
 	// to the server.
 	return ""
+}
+
+func (req *ConnectCALeafRequest) TargetPartition() string {
+	return req.PartitionOrDefault()
 }
 
 func (r *ConnectCALeafRequest) CacheInfo() cache.RequestInfo {

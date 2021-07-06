@@ -6,11 +6,12 @@ import (
 
 	"github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
+	"github.com/hashicorp/go-memdb"
+
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/consul/state"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/lib"
-	"github.com/hashicorp/go-memdb"
 )
 
 var ACLEndpointLegacySummaries = []prometheus.SummaryDefinition{
@@ -23,7 +24,7 @@ var ACLEndpointLegacySummaries = []prometheus.SummaryDefinition{
 // Bootstrap is used to perform a one-time ACL bootstrap operation on
 // a cluster to get the first management token.
 func (a *ACL) Bootstrap(args *structs.DCSpecificRequest, reply *structs.ACL) error {
-	if done, err := a.srv.ForwardRPC("ACL.Bootstrap", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.Bootstrap", args, reply); done {
 		return err
 	}
 
@@ -68,9 +69,6 @@ func (a *ACL) Bootstrap(args *structs.DCSpecificRequest, reply *structs.ACL) err
 		return err
 	}
 	switch v := resp.(type) {
-	case error:
-		return v
-
 	case *structs.ACL:
 		*reply = *v
 
@@ -143,11 +141,7 @@ func aclApplyInternal(srv *Server, args *structs.ACLRequest, reply *string) erro
 	// Apply the update
 	resp, err := srv.raftApply(structs.ACLRequestType, args)
 	if err != nil {
-		srv.logger.Error("Raft apply failed", "acl_op", args.Op, "error", err)
-		return err
-	}
-	if respErr, ok := resp.(error); ok {
-		return respErr
+		return fmt.Errorf("raft apply failed: %w", err)
 	}
 
 	// Check if the return type is a string
@@ -161,7 +155,7 @@ func aclApplyInternal(srv *Server, args *structs.ACLRequest, reply *string) erro
 // Apply is used to apply a modifying request to the data store. This should
 // only be used for operations that modify the data
 func (a *ACL) Apply(args *structs.ACLRequest, reply *string) error {
-	if done, err := a.srv.ForwardRPC("ACL.Apply", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.Apply", args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"acl", "apply"}, time.Now())
@@ -207,7 +201,7 @@ func (a *ACL) Apply(args *structs.ACLRequest, reply *string) error {
 // Get is used to retrieve a single ACL
 func (a *ACL) Get(args *structs.ACLSpecificRequest,
 	reply *structs.IndexedACLs) error {
-	if done, err := a.srv.ForwardRPC("ACL.Get", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.Get", args, reply); done {
 		return err
 	}
 
@@ -253,7 +247,7 @@ func (a *ACL) Get(args *structs.ACLSpecificRequest,
 // List is used to list all the ACLs
 func (a *ACL) List(args *structs.DCSpecificRequest,
 	reply *structs.IndexedACLs) error {
-	if done, err := a.srv.ForwardRPC("ACL.List", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.List", args, reply); done {
 		return err
 	}
 

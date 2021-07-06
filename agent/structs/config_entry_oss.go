@@ -19,6 +19,9 @@ func validateUnusedKeys(unused []string) error {
 	for _, k := range unused {
 		switch {
 		case k == "CreateIndex" || k == "ModifyIndex":
+		case k == "kind" || k == "Kind":
+			// The kind field is used to determine the target, but doesn't need
+			// to exist on the target.
 		case strings.HasSuffix(strings.ToLower(k), "namespace"):
 			err = multierror.Append(err, fmt.Errorf("invalid config key %q, namespaces are a consul enterprise feature", k))
 		default:
@@ -26,4 +29,8 @@ func validateUnusedKeys(unused []string) error {
 		}
 	}
 	return err
+}
+
+func validateInnerEnterpriseMeta(_, _ *EnterpriseMeta) error {
+	return nil
 }

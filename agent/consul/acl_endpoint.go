@@ -13,16 +13,17 @@ import (
 
 	"github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
+	"github.com/hashicorp/go-bexpr"
+	"github.com/hashicorp/go-hclog"
+	memdb "github.com/hashicorp/go-memdb"
+	uuid "github.com/hashicorp/go-uuid"
+
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/consul/authmethod"
 	"github.com/hashicorp/consul/agent/consul/state"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/lib"
 	"github.com/hashicorp/consul/lib/template"
-	"github.com/hashicorp/go-bexpr"
-	"github.com/hashicorp/go-hclog"
-	memdb "github.com/hashicorp/go-memdb"
-	uuid "github.com/hashicorp/go-uuid"
 )
 
 const (
@@ -183,7 +184,7 @@ func (a *ACL) BootstrapTokens(args *structs.DCSpecificRequest, reply *structs.AC
 	if err := a.aclPreCheck(); err != nil {
 		return err
 	}
-	if done, err := a.srv.ForwardRPC("ACL.BootstrapTokens", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.BootstrapTokens", args, reply); done {
 		return err
 	}
 
@@ -250,12 +251,8 @@ func (a *ACL) BootstrapTokens(args *structs.DCSpecificRequest, reply *structs.AC
 
 	req.Token.SetHash(true)
 
-	resp, err := a.srv.raftApply(structs.ACLBootstrapRequestType, &req)
+	_, err = a.srv.raftApply(structs.ACLBootstrapRequestType, &req)
 	if err != nil {
-		return err
-	}
-
-	if err, ok := resp.(error); ok {
 		return err
 	}
 
@@ -282,7 +279,7 @@ func (a *ACL) TokenRead(args *structs.ACLTokenGetRequest, reply *structs.ACLToke
 		args.Datacenter = a.srv.config.ACLDatacenter
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.TokenRead", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.TokenRead", args, reply); done {
 		return err
 	}
 
@@ -351,7 +348,7 @@ func (a *ACL) TokenClone(args *structs.ACLTokenSetRequest, reply *structs.ACLTok
 		args.Datacenter = a.srv.config.ACLDatacenter
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.TokenClone", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.TokenClone", args, reply); done {
 		return err
 	}
 
@@ -422,7 +419,7 @@ func (a *ACL) TokenSet(args *structs.ACLTokenSetRequest, reply *structs.ACLToken
 		return fmt.Errorf("Local tokens are disabled")
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.TokenSet", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.TokenSet", args, reply); done {
 		return err
 	}
 
@@ -729,17 +726,13 @@ func (a *ACL) tokenSetInternal(args *structs.ACLTokenSetRequest, reply *structs.
 		req.ProhibitUnprivileged = true
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLTokenSetRequestType, req)
+	_, err = a.srv.raftApply(structs.ACLTokenSetRequestType, req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply token write request: %v", err)
 	}
 
 	// Purge the identity from the cache to prevent using the previous definition of the identity
 	a.srv.acls.cache.RemoveIdentity(tokenSecretCacheID(token.SecretID))
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
-	}
 
 	// Don't check expiration times here as it doesn't really matter.
 	if _, updatedToken, err := a.srv.fsm.State().ACLTokenGetByAccessor(nil, token.AccessorID, nil); err == nil && updatedToken != nil {
@@ -832,7 +825,7 @@ func (a *ACL) TokenDelete(args *structs.ACLTokenDeleteRequest, reply *string) er
 		args.Datacenter = a.srv.config.ACLDatacenter
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.TokenDelete", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.TokenDelete", args, reply); done {
 		return err
 	}
 
@@ -885,17 +878,13 @@ func (a *ACL) TokenDelete(args *structs.ACLTokenDeleteRequest, reply *string) er
 		TokenIDs: []string{args.TokenID},
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLTokenDeleteRequestType, req)
+	_, err = a.srv.raftApply(structs.ACLTokenDeleteRequestType, req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply token delete request: %v", err)
 	}
 
 	// Purge the identity from the cache to prevent using the previous definition of the identity
 	a.srv.acls.cache.RemoveIdentity(tokenSecretCacheID(token.SecretID))
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
-	}
 
 	if reply != nil {
 		*reply = token.AccessorID
@@ -922,7 +911,7 @@ func (a *ACL) TokenList(args *structs.ACLTokenListRequest, reply *structs.ACLTok
 		args.Datacenter = a.srv.config.ACLDatacenter
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.TokenList", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.TokenList", args, reply); done {
 		return err
 	}
 
@@ -985,7 +974,7 @@ func (a *ACL) TokenBatchRead(args *structs.ACLTokenBatchGetRequest, reply *struc
 		args.Datacenter = a.srv.config.ACLDatacenter
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.TokenBatchRead", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.TokenBatchRead", args, reply); done {
 		return err
 	}
 
@@ -1039,7 +1028,7 @@ func (a *ACL) PolicyRead(args *structs.ACLPolicyGetRequest, reply *structs.ACLPo
 		return err
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.PolicyRead", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.PolicyRead", args, reply); done {
 		return err
 	}
 
@@ -1077,7 +1066,7 @@ func (a *ACL) PolicyBatchRead(args *structs.ACLPolicyBatchGetRequest, reply *str
 		return err
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.PolicyBatchRead", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.PolicyBatchRead", args, reply); done {
 		return err
 	}
 
@@ -1115,7 +1104,7 @@ func (a *ACL) PolicySet(args *structs.ACLPolicySetRequest, reply *structs.ACLPol
 		args.Datacenter = a.srv.config.ACLDatacenter
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.PolicySet", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.PolicySet", args, reply); done {
 		return err
 	}
 
@@ -1218,17 +1207,13 @@ func (a *ACL) PolicySet(args *structs.ACLPolicySetRequest, reply *structs.ACLPol
 		Policies: structs.ACLPolicies{policy},
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLPolicySetRequestType, req)
+	_, err = a.srv.raftApply(structs.ACLPolicySetRequestType, req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply policy upsert request: %v", err)
 	}
 
 	// Remove from the cache to prevent stale cache usage
 	a.srv.acls.cache.RemovePolicy(policy.ID)
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
-	}
 
 	if _, policy, err := a.srv.fsm.State().ACLPolicyGetByID(nil, policy.ID, &policy.EnterpriseMeta); err == nil && policy != nil {
 		*reply = *policy
@@ -1250,7 +1235,7 @@ func (a *ACL) PolicyDelete(args *structs.ACLPolicyDeleteRequest, reply *string) 
 		args.Datacenter = a.srv.config.ACLDatacenter
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.PolicyDelete", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.PolicyDelete", args, reply); done {
 		return err
 	}
 
@@ -1282,16 +1267,12 @@ func (a *ACL) PolicyDelete(args *structs.ACLPolicyDeleteRequest, reply *string) 
 		PolicyIDs: []string{args.PolicyID},
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLPolicyDeleteRequestType, &req)
+	_, err = a.srv.raftApply(structs.ACLPolicyDeleteRequestType, &req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply policy delete request: %v", err)
 	}
 
 	a.srv.acls.cache.RemovePolicy(policy.ID)
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
-	}
 
 	*reply = policy.Name
 
@@ -1307,7 +1288,7 @@ func (a *ACL) PolicyList(args *structs.ACLPolicyListRequest, reply *structs.ACLP
 		return err
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.PolicyList", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.PolicyList", args, reply); done {
 		return err
 	}
 
@@ -1347,7 +1328,7 @@ func (a *ACL) PolicyResolve(args *structs.ACLPolicyBatchGetRequest, reply *struc
 		return err
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.PolicyResolve", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.PolicyResolve", args, reply); done {
 		return err
 	}
 
@@ -1405,7 +1386,7 @@ func makeACLETag(parent string, policy *acl.Policy) string {
 // GetPolicy is used to retrieve a compiled policy object with a TTL. Does not
 // support a blocking query.
 func (a *ACL) GetPolicy(args *structs.ACLPolicyResolveLegacyRequest, reply *structs.ACLPolicyResolveLegacyResponse) error {
-	if done, err := a.srv.ForwardRPC("ACL.GetPolicy", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.GetPolicy", args, reply); done {
 		return err
 	}
 
@@ -1452,7 +1433,7 @@ func (a *ACL) ReplicationStatus(args *structs.DCSpecificRequest,
 	// re-using a structure where we don't support all the options.
 	args.RequireConsistent = true
 	args.AllowStale = false
-	if done, err := a.srv.ForwardRPC("ACL.ReplicationStatus", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.ReplicationStatus", args, reply); done {
 		return err
 	}
 
@@ -1480,7 +1461,7 @@ func (a *ACL) RoleRead(args *structs.ACLRoleGetRequest, reply *structs.ACLRoleRe
 		return err
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.RoleRead", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.RoleRead", args, reply); done {
 		return err
 	}
 
@@ -1519,7 +1500,7 @@ func (a *ACL) RoleBatchRead(args *structs.ACLRoleBatchGetRequest, reply *structs
 		return err
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.RoleBatchRead", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.RoleBatchRead", args, reply); done {
 		return err
 	}
 
@@ -1557,7 +1538,7 @@ func (a *ACL) RoleSet(args *structs.ACLRoleSetRequest, reply *structs.ACLRole) e
 		args.Datacenter = a.srv.config.ACLDatacenter
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.RoleSet", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.RoleSet", args, reply); done {
 		return err
 	}
 
@@ -1687,17 +1668,13 @@ func (a *ACL) RoleSet(args *structs.ACLRoleSetRequest, reply *structs.ACLRole) e
 		Roles: structs.ACLRoles{role},
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLRoleSetRequestType, req)
+	_, err = a.srv.raftApply(structs.ACLRoleSetRequestType, req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply role upsert request: %v", err)
 	}
 
 	// Remove from the cache to prevent stale cache usage
 	a.srv.acls.cache.RemoveRole(role.ID)
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
-	}
 
 	if _, role, err := a.srv.fsm.State().ACLRoleGetByID(nil, role.ID, &role.EnterpriseMeta); err == nil && role != nil {
 		*reply = *role
@@ -1719,7 +1696,7 @@ func (a *ACL) RoleDelete(args *structs.ACLRoleDeleteRequest, reply *string) erro
 		args.Datacenter = a.srv.config.ACLDatacenter
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.RoleDelete", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.RoleDelete", args, reply); done {
 		return err
 	}
 
@@ -1747,16 +1724,12 @@ func (a *ACL) RoleDelete(args *structs.ACLRoleDeleteRequest, reply *string) erro
 		RoleIDs: []string{args.RoleID},
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLRoleDeleteRequestType, &req)
+	_, err = a.srv.raftApply(structs.ACLRoleDeleteRequestType, &req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply role delete request: %v", err)
 	}
 
 	a.srv.acls.cache.RemoveRole(role.ID)
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
-	}
 
 	*reply = role.Name
 
@@ -1772,7 +1745,7 @@ func (a *ACL) RoleList(args *structs.ACLRoleListRequest, reply *structs.ACLRoleL
 		return err
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.RoleList", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.RoleList", args, reply); done {
 		return err
 	}
 
@@ -1806,7 +1779,7 @@ func (a *ACL) RoleResolve(args *structs.ACLRoleBatchGetRequest, reply *structs.A
 		return err
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.RoleResolve", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.RoleResolve", args, reply); done {
 		return err
 	}
 
@@ -1871,7 +1844,7 @@ func (a *ACL) BindingRuleRead(args *structs.ACLBindingRuleGetRequest, reply *str
 		return errAuthMethodsRequireTokenReplication
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.BindingRuleRead", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.BindingRuleRead", args, reply); done {
 		return err
 	}
 
@@ -1910,7 +1883,7 @@ func (a *ACL) BindingRuleSet(args *structs.ACLBindingRuleSetRequest, reply *stru
 		return errAuthMethodsRequireTokenReplication
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.BindingRuleSet", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.BindingRuleSet", args, reply); done {
 		return err
 	}
 
@@ -2014,12 +1987,9 @@ func (a *ACL) BindingRuleSet(args *structs.ACLBindingRuleSetRequest, reply *stru
 		BindingRules: structs.ACLBindingRules{rule},
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLBindingRuleSetRequestType, req)
+	_, err = a.srv.raftApply(structs.ACLBindingRuleSetRequestType, req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply binding rule upsert request: %v", err)
-	}
-	if respErr, ok := resp.(error); ok {
-		return fmt.Errorf("Failed to apply binding rule upsert request: %v", respErr)
 	}
 
 	if _, rule, err := a.srv.fsm.State().ACLBindingRuleGetByID(nil, rule.ID, &rule.EnterpriseMeta); err == nil && rule != nil {
@@ -2042,7 +2012,7 @@ func (a *ACL) BindingRuleDelete(args *structs.ACLBindingRuleDeleteRequest, reply
 		return errAuthMethodsRequireTokenReplication
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.BindingRuleDelete", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.BindingRuleDelete", args, reply); done {
 		return err
 	}
 
@@ -2070,13 +2040,9 @@ func (a *ACL) BindingRuleDelete(args *structs.ACLBindingRuleDeleteRequest, reply
 		BindingRuleIDs: []string{args.BindingRuleID},
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLBindingRuleDeleteRequestType, &req)
+	_, err = a.srv.raftApply(structs.ACLBindingRuleDeleteRequestType, &req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply binding rule delete request: %v", err)
-	}
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
 	}
 
 	*reply = true
@@ -2097,7 +2063,7 @@ func (a *ACL) BindingRuleList(args *structs.ACLBindingRuleListRequest, reply *st
 		return errAuthMethodsRequireTokenReplication
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.BindingRuleList", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.BindingRuleList", args, reply); done {
 		return err
 	}
 
@@ -2137,7 +2103,7 @@ func (a *ACL) AuthMethodRead(args *structs.ACLAuthMethodGetRequest, reply *struc
 		return errAuthMethodsRequireTokenReplication
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.AuthMethodRead", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.AuthMethodRead", args, reply); done {
 		return err
 	}
 
@@ -2179,7 +2145,7 @@ func (a *ACL) AuthMethodSet(args *structs.ACLAuthMethodSetRequest, reply *struct
 		return errAuthMethodsRequireTokenReplication
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.AuthMethodSet", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.AuthMethodSet", args, reply); done {
 		return err
 	}
 
@@ -2266,13 +2232,9 @@ func (a *ACL) AuthMethodSet(args *structs.ACLAuthMethodSetRequest, reply *struct
 		AuthMethods: structs.ACLAuthMethods{method},
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLAuthMethodSetRequestType, req)
+	_, err = a.srv.raftApply(structs.ACLAuthMethodSetRequestType, req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply auth method upsert request: %v", err)
-	}
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
 	}
 
 	if _, method, err := a.srv.fsm.State().ACLAuthMethodGetByName(nil, method.Name, &method.EnterpriseMeta); err == nil && method != nil {
@@ -2295,7 +2257,7 @@ func (a *ACL) AuthMethodDelete(args *structs.ACLAuthMethodDeleteRequest, reply *
 		return errAuthMethodsRequireTokenReplication
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.AuthMethodDelete", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.AuthMethodDelete", args, reply); done {
 		return err
 	}
 
@@ -2328,13 +2290,9 @@ func (a *ACL) AuthMethodDelete(args *structs.ACLAuthMethodDeleteRequest, reply *
 		EnterpriseMeta:  args.EnterpriseMeta,
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLAuthMethodDeleteRequestType, &req)
+	_, err = a.srv.raftApply(structs.ACLAuthMethodDeleteRequestType, &req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply auth method delete request: %v", err)
-	}
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
 	}
 
 	*reply = true
@@ -2355,7 +2313,7 @@ func (a *ACL) AuthMethodList(args *structs.ACLAuthMethodListRequest, reply *stru
 		return errAuthMethodsRequireTokenReplication
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.AuthMethodList", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.AuthMethodList", args, reply); done {
 		return err
 	}
 
@@ -2409,7 +2367,7 @@ func (a *ACL) Login(args *structs.ACLLoginRequest, reply *structs.ACLToken) erro
 		return errors.New("do not provide a token when logging in")
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.Login", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.Login", args, reply); done {
 		return err
 	}
 
@@ -2422,7 +2380,7 @@ func (a *ACL) Login(args *structs.ACLLoginRequest, reply *structs.ACLToken) erro
 	if err != nil {
 		return err
 	} else if method == nil {
-		return acl.ErrNotFound
+		return fmt.Errorf("%w: auth method %q not found", acl.ErrNotFound, auth.AuthMethod)
 	}
 
 	if err := a.enterpriseAuthMethodTypeValidation(method.Type); err != nil {
@@ -2554,7 +2512,7 @@ func (a *ACL) Logout(args *structs.ACLLogoutRequest, reply *bool) error {
 		return acl.ErrNotFound
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.Logout", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.Logout", args, reply); done {
 		return err
 	}
 
@@ -2583,17 +2541,13 @@ func (a *ACL) Logout(args *structs.ACLLogoutRequest, reply *bool) error {
 		TokenIDs: []string{token.AccessorID},
 	}
 
-	resp, err := a.srv.raftApply(structs.ACLTokenDeleteRequestType, req)
+	_, err = a.srv.raftApply(structs.ACLTokenDeleteRequestType, req)
 	if err != nil {
 		return fmt.Errorf("Failed to apply token delete request: %v", err)
 	}
 
 	// Purge the identity from the cache to prevent using the previous definition of the identity
 	a.srv.acls.cache.RemoveIdentity(tokenSecretCacheID(token.SecretID))
-
-	if respErr, ok := resp.(error); ok {
-		return respErr
-	}
 
 	*reply = true
 
@@ -2605,7 +2559,7 @@ func (a *ACL) Authorize(args *structs.RemoteACLAuthorizationRequest, reply *[]st
 		return err
 	}
 
-	if done, err := a.srv.ForwardRPC("ACL.Authorize", args, args, reply); done {
+	if done, err := a.srv.ForwardRPC("ACL.Authorize", args, reply); done {
 		return err
 	}
 

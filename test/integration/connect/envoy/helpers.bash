@@ -231,6 +231,33 @@ function get_envoy_http_filters {
   echo "$output" | jq --raw-output '.configs[2].dynamic_listeners[].active_state.listener | "\(.name) \( .filter_chains[0].filters[] | select(.name == "envoy.filters.network.http_connection_manager") | .typed_config.http_filters | map(.name) | join(","))"'
 }
 
+function get_envoy_dynamic_cluster_once {
+  local HOSTPORT=$1
+  local NAME_PREFIX=$2
+  run curl -s -f $HOSTPORT/config_dump
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output ".configs[] | select (.[\"@type\"] == \"type.googleapis.com/envoy.admin.v3.ClustersConfigDump\") | .dynamic_active_clusters[] | select(.cluster.name | startswith(\"${NAME_PREFIX}\"))"
+}
+
+function assert_envoy_dynamic_cluster_exists_once {
+  local HOSTPORT=$1
+  local NAME_PREFIX=$2
+  local EXPECT_SNI=$3
+  BODY="$(get_envoy_dynamic_cluster_once $HOSTPORT $NAME_PREFIX)"
+  [ -n "$BODY" ]
+
+  SNI="$(echo "$BODY" | jq --raw-output ".cluster.transport_socket.typed_config.sni | select(. | startswith(\"${EXPECT_SNI}\"))")"
+  [ -n "$SNI" ]
+}
+
+function assert_envoy_dynamic_cluster_exists {
+  local HOSTPORT=$1
+  local NAME_PREFIX=$2
+  local EXPECT_SNI=$3
+  run retry_long assert_envoy_dynamic_cluster_exists_once $HOSTPORT $NAME_PREFIX $EXPECT_SNI
+  [ "$status" -eq 0 ]
+}
+
 function get_envoy_cluster_config {
   local HOSTPORT=$1
   local CLUSTER_NAME=$2
@@ -528,26 +555,11 @@ function docker_consul_exec {
   docker_exec envoy_consul-${DC}_1 "$@"
 }
 
-function get_envoy_pid {
-  local BOOTSTRAP_NAME=$1
-  local DC=${2:-primary}
-  run ps aux
-  [ "$status" == 0 ]
-  echo "$output" 1>&2
-  PID="$(echo "$output" | grep "envoy -c /workdir/$DC/envoy/${BOOTSTRAP_NAME}-bootstrap.json" | awk '{print $1}')"
-  [ -n "$PID" ]
-
-  echo "$PID"
-}
-
 function kill_envoy {
   local BOOTSTRAP_NAME=$1
   local DC=${2:-primary}
 
-  PID="$(get_envoy_pid $BOOTSTRAP_NAME "$DC")"
-  echo "PID = $PID"
-
-  kill -TERM $PID
+  pkill -TERM -f "envoy -c /workdir/$DC/envoy/${BOOTSTRAP_NAME}-bootstrap.json"
 }
 
 function must_match_in_statsd_logs {
@@ -845,6 +857,36 @@ function assert_expected_fortio_name_pattern {
       :
   else
     echo "expected name pattern: $EXPECT_NAME_PATTERN, actual name: $GOT" 1>&2
+    return 1
+  fi
+}
+
+function get_upstream_fortio_host_header {
+  local HOST=$1
+  local PORT=$2
+  local PREFIX=$3
+  local DEBUG_HEADER_VALUE="${4:-""}"
+  local extra_args
+  if [[ -n "${DEBUG_HEADER_VALUE}" ]]; then
+      extra_args="-H x-test-debug:${DEBUG_HEADER_VALUE}"
+  fi
+  run retry_default curl -v -s -f -H"Host: ${HOST}" $extra_args \
+      "localhost:${PORT}${PREFIX}/debug"
+  [ "$status" == 0 ]
+  echo "$output" | grep -E "^Host: "
+}
+
+function assert_expected_fortio_host_header {
+  local EXPECT_HOST=$1
+  local HOST=${2:-"localhost"}
+  local PORT=${3:-5000}
+  local URL_PREFIX=${4:-""}
+  local DEBUG_HEADER_VALUE="${5:-""}"
+
+  GOT=$(get_upstream_fortio_host_header ${HOST} ${PORT} "${URL_PREFIX}" "${DEBUG_HEADER_VALUE}")
+
+  if [ "$GOT" != "Host: ${EXPECT_HOST}" ]; then
+    echo "expected Host header: $EXPECT_HOST, actual Host header: $GOT" 1>&2
     return 1
   fi
 }

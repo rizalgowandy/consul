@@ -1,7 +1,6 @@
 ---
 layout: docs
 page_title: Upgrade Consul
-sidebar_title: Upgrade
 description: >-
   Consul is meant to be a long-running agent on any nodes participating in a
   Consul cluster. These nodes consistently communicate with each other. As such,
@@ -18,12 +17,15 @@ keep in mind when using Consul.
 
 This page documents how to upgrade Consul when a new version is released.
 
+-> **Tip:** For Consul Enterprise, see the [Automated Upgrades documentation](/docs/enterprise/upgrades).
+
 ## Standard Upgrades
 
 For upgrades we strive to ensure backwards compatibility. To support this,
 nodes gossip their protocol version and builds. This enables clients and
 servers to intelligently enable new features when available, or to gracefully
 fallback to a backward compatible mode of operation otherwise.
+Visit the [General Upgrade Process](https://www.consul.io/docs/upgrading/instructions/general-process) for a detailed upgrade guide.
 
 For most upgrades, the process is simple. Assuming the current version of
 Consul is A, and version B is released.

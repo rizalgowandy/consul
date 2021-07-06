@@ -1,3 +1,7 @@
+// All of the configuration here is shared between buildtime and runtime and
+// is therefore added to ember's <meta> tag in the actual app, if the
+// configuration is for buildtime only you should probably just use
+// ember-cli-build to prevent values being outputted in the meta tag
 'use strict';
 const path = require('path');
 const utils = require('./utils');
@@ -37,7 +41,8 @@ module.exports = function(environment, $ = process.env) {
     modulePrefix: 'consul-ui',
     environment,
     rootURL: '/ui/',
-    locationType: 'auto',
+    locationType: 'fsm-with-optional',
+    historySupportMiddleware: true,
 
     // We use a complete dynamically (from Consul) configured torii provider.
     // We provide this object here to prevent ember from giving a log message
@@ -97,6 +102,7 @@ module.exports = function(environment, $ = process.env) {
       ACLsEnabled: false,
       NamespacesEnabled: false,
       SSOEnabled: false,
+      PartitionsEnabled: false,
       LocalDatacenter: env('CONSUL_DATACENTER_LOCAL', 'dc1'),
     },
 
@@ -111,13 +117,14 @@ module.exports = function(environment, $ = process.env) {
   switch (true) {
     case environment === 'test':
       ENV = Object.assign({}, ENV, {
-        locationType: 'none',
+        locationType: 'fsm-with-optional-test',
 
         // During testing ACLs default to being turned on
         operatorConfig: {
           ACLsEnabled: env('CONSUL_ACLS_ENABLED', true),
           NamespacesEnabled: env('CONSUL_NSPACES_ENABLED', false),
           SSOEnabled: env('CONSUL_SSO_ENABLED', false),
+          PartitionsEnabled: env('CONSUL_PARTITIONS_ENABLED', false),
           LocalDatacenter: env('CONSUL_DATACENTER_LOCAL', 'dc1'),
         },
 
@@ -148,10 +155,14 @@ module.exports = function(environment, $ = process.env) {
         // different staging sites can be built with certain features disabled
         // by setting an environment variable to 0 during building (e.g.
         // CONSUL_NSPACES_ENABLED=0 make build)
+
+        // TODO: We should be able to remove this now we can link to different
+        // scenarios in staging
         operatorConfig: {
           ACLsEnabled: env('CONSUL_ACLS_ENABLED', true),
           NamespacesEnabled: env('CONSUL_NSPACES_ENABLED', true),
           SSOEnabled: env('CONSUL_SSO_ENABLED', true),
+          PartitionsEnabled: env('CONSUL_PARTITIONS_ENABLED', true),
           LocalDatacenter: env('CONSUL_DATACENTER_LOCAL', 'dc1'),
         },
 

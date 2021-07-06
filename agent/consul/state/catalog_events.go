@@ -95,6 +95,7 @@ func serviceHealthSnapshot(db ReadDB, topic stream.Topic) stream.SnapshotFunc {
 	}
 }
 
+// TODO: this could use NodeServiceQuery
 type nodeServiceTuple struct {
 	Node      string
 	ServiceID string
@@ -169,12 +170,12 @@ func ServiceHealthEventsFromChanges(tx ReadTxn, changes Changes) ([]stream.Event
 			n := changeObject(change).(*structs.Node)
 			markNode(n.Node, changeTypeFromChange(change))
 
-		case "services":
+		case tableServices:
 			sn := changeObject(change).(*structs.ServiceNode)
 			srvChange := serviceChange{changeType: changeTypeFromChange(change), change: change}
 			markService(newNodeServiceTupleFromServiceNode(sn), srvChange)
 
-		case "checks":
+		case tableChecks:
 			// For health we only care about the scope for now to know if it's just
 			// affecting a single service or every service on a node. There is a
 			// subtle edge case where the check with same ID changes from being node
@@ -302,7 +303,8 @@ func ServiceHealthEventsFromChanges(tx ReadTxn, changes Changes) ([]stream.Event
 		for serviceName, gsChange := range serviceChanges {
 			gs := changeObject(gsChange.change).(*structs.GatewayService)
 
-			_, nodes, err := serviceNodesTxn(tx, nil, gs.Gateway.Name, false, &gatewayName.EnterpriseMeta)
+			q := Query{Value: gs.Gateway.Name, EnterpriseMeta: gatewayName.EnterpriseMeta}
+			_, nodes, err := serviceNodesTxn(tx, nil, indexService, q)
 			if err != nil {
 				return nil, err
 			}
@@ -450,7 +452,12 @@ func connectEventsByServiceKind(tx ReadTxn, origEvent stream.Event) ([]stream.Ev
 
 	case structs.ServiceKindTerminatingGateway:
 		var result []stream.Event
-		iter, err := gatewayServices(tx, node.Service.Service, &node.Service.EnterpriseMeta)
+
+		sn := structs.ServiceName{
+			Name:           node.Service.Service,
+			EnterpriseMeta: node.Service.EnterpriseMeta,
+		}
+		iter, err := tx.Get(tableGatewayServices, indexGateway, sn)
 		if err != nil {
 			return nil, err
 		}
@@ -491,7 +498,7 @@ func getPayloadCheckServiceNode(payload stream.Payload) *structs.CheckServiceNod
 // parseCheckServiceNodes but is more efficient since we know they are all on
 // the same node.
 func newServiceHealthEventsForNode(tx ReadTxn, idx uint64, node string) ([]stream.Event, error) {
-	services, err := catalogServiceListByNode(tx, node, structs.WildcardEnterpriseMeta(), true)
+	services, err := tx.Get(tableServices, indexNode, Query{Value: node})
 	if err != nil {
 		return nil, err
 	}
@@ -525,7 +532,7 @@ func getNodeAndChecks(tx ReadTxn, node string) (*structs.Node, serviceChecksFunc
 	}
 	n := nodeRaw.(*structs.Node)
 
-	iter, err := catalogListChecksByNode(tx, node, structs.WildcardEnterpriseMeta())
+	iter, err := tx.Get(tableChecks, indexNode, Query{Value: node})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -564,7 +571,7 @@ func newServiceHealthEventForService(tx ReadTxn, idx uint64, tuple nodeServiceTu
 		return stream.Event{}, err
 	}
 
-	svc, err := getCompoundWithTxn(tx, "services", "id", &tuple.EntMeta, tuple.Node, tuple.ServiceID)
+	svc, err := tx.Get(tableServices, indexID, NodeServiceQuery{EnterpriseMeta: tuple.EntMeta, Node: tuple.Node, Service: tuple.ServiceID})
 	if err != nil {
 		return stream.Event{}, err
 	}

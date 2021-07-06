@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"net"
 	"reflect"
 	"regexp"
 	"sort"
@@ -160,6 +159,12 @@ const (
 	// we multiply by time.Second
 	lockDelayMinThreshold = 1000
 
+	// JitterFraction is a the limit to the amount of jitter we apply
+	// to a user specified MaxQueryTime. We divide the specified time by
+	// the fraction. So 16 == 6.25% limit of jitter. This same fraction
+	// is applied to the RPCHoldTimeout
+	JitterFraction = 16
+
 	// WildcardSpecifier is the string which should be used for specifying a wildcard
 	// The exact semantics of the wildcard is left up to the code where its used.
 	WildcardSpecifier = "*"
@@ -194,6 +199,7 @@ type RPCInfo interface {
 	AllowStaleRead() bool
 	TokenSecret() string
 	SetTokenSecret(string)
+	HasTimedOut(since time.Time, rpcHoldTimeout, maxQueryTime, defaultQueryTime time.Duration) bool
 }
 
 // QueryOptions is used to specify various flags for read queries
@@ -292,6 +298,20 @@ func (q *QueryOptions) SetTokenSecret(s string) {
 	q.Token = s
 }
 
+func (q QueryOptions) HasTimedOut(start time.Time, rpcHoldTimeout, maxQueryTime, defaultQueryTime time.Duration) bool {
+	if q.MinQueryIndex > 0 {
+		if q.MaxQueryTime > maxQueryTime {
+			q.MaxQueryTime = maxQueryTime
+		} else if q.MaxQueryTime <= 0 {
+			q.MaxQueryTime = defaultQueryTime
+		}
+		q.MaxQueryTime += lib.RandomStagger(q.MaxQueryTime / JitterFraction)
+
+		return time.Since(start) > (q.MaxQueryTime + rpcHoldTimeout)
+	}
+	return time.Since(start) > rpcHoldTimeout
+}
+
 type WriteRequest struct {
 	// Token is the ACL token ID. If not provided, the 'anonymous'
 	// token is assumed for backwards compatibility.
@@ -313,6 +333,28 @@ func (w WriteRequest) TokenSecret() string {
 
 func (w *WriteRequest) SetTokenSecret(s string) {
 	w.Token = s
+}
+
+func (w WriteRequest) HasTimedOut(start time.Time, rpcHoldTimeout, maxQueryTime, defaultQueryTime time.Duration) bool {
+	return time.Since(start) > rpcHoldTimeout
+}
+
+type QueryBackend int
+
+const (
+	QueryBackendBlocking QueryBackend = iota
+	QueryBackendStreaming
+)
+
+func (q QueryBackend) String() string {
+	switch q {
+	case QueryBackendBlocking:
+		return "blocking-query"
+	case QueryBackendStreaming:
+		return "streaming"
+	default:
+		return ""
+	}
 }
 
 // QueryMeta allows a query response to include potentially
@@ -339,6 +381,9 @@ type QueryMeta struct {
 	// When NotModified is true, the response will not contain the result of
 	// the query.
 	NotModified bool
+
+	// Backend used to handle this query, either blocking-query or streaming.
+	Backend QueryBackend
 }
 
 // RegisterRequest is used for the Catalog.Register endpoint
@@ -618,6 +663,7 @@ func (r *ServiceSpecificRequest) CacheInfo() cache.RequestInfo {
 		r.Filter,
 		r.EnterpriseMeta,
 		r.Ingress,
+		r.ServiceKind,
 	}, nil)
 	if err == nil {
 		// If there is an error, we don't set the key. A blank key forces
@@ -808,6 +854,8 @@ type Services map[string][]string
 // in the state store and are filled in on the way out by parseServiceNodes().
 // This is also why PartialClone() skips them, because we know they are blank
 // already so it would be a waste of time to copy them.
+// This is somewhat complicated when the address is really a unix domain socket; technically that
+// will override the address field, but in practice the two use cases should not overlap.
 type ServiceNode struct {
 	ID                       types.NodeID
 	Node                     string
@@ -824,6 +872,7 @@ type ServiceNode struct {
 	ServiceWeights           Weights
 	ServiceMeta              map[string]string
 	ServicePort              int
+	ServiceSocketPath        string
 	ServiceEnableTagOverride bool
 	ServiceProxy             ConnectProxyConfig
 	ServiceConnect           ServiceConnect
@@ -831,6 +880,10 @@ type ServiceNode struct {
 	EnterpriseMeta `hcl:",squash" mapstructure:",squash" bexpr:"-"`
 
 	RaftIndex `bexpr:"-"`
+}
+
+func (s *ServiceNode) NodeIdentity() Identity {
+	return Identity{ID: s.Node}
 }
 
 // PartialClone() returns a clone of the given service node, minus the node-
@@ -861,6 +914,7 @@ func (s *ServiceNode) PartialClone() *ServiceNode {
 		ServiceName:              s.ServiceName,
 		ServiceTags:              tags,
 		ServiceAddress:           s.ServiceAddress,
+		ServiceSocketPath:        s.ServiceSocketPath,
 		ServiceTaggedAddresses:   svcTaggedAddrs,
 		ServicePort:              s.ServicePort,
 		ServiceMeta:              nsmeta,
@@ -886,6 +940,7 @@ func (s *ServiceNode) ToNodeService() *NodeService {
 		Address:           s.ServiceAddress,
 		TaggedAddresses:   s.ServiceTaggedAddresses,
 		Port:              s.ServicePort,
+		SocketPath:        s.ServiceSocketPath,
 		Meta:              s.ServiceMeta,
 		Weights:           &s.ServiceWeights,
 		EnableTagOverride: s.ServiceEnableTagOverride,
@@ -992,7 +1047,8 @@ type NodeService struct {
 	Address           string
 	TaggedAddresses   map[string]ServiceAddress `json:",omitempty"`
 	Meta              map[string]string
-	Port              int
+	Port              int    `json:",omitempty"`
+	SocketPath        string `json:",omitempty"` // TODO This might be integrated into Address somehow, but not sure about the ergonomics. Only one of (address,port) or socketpath can be defined.
 	Weights           *Weights
 	EnableTagOverride bool
 
@@ -1149,10 +1205,15 @@ func (s *NodeService) Validate() error {
 				"Proxy.DestinationServiceName must be non-empty for Connect proxy "+
 					"services"))
 		}
-
-		if s.Port == 0 {
+		if s.Proxy.DestinationServiceName == WildcardSpecifier {
 			result = multierror.Append(result, fmt.Errorf(
-				"Port must be set for a Connect proxy"))
+				"Proxy.DestinationServiceName must not be a wildcard for Connect proxy "+
+					"services"))
+		}
+
+		if s.Port == 0 && s.SocketPath == "" {
+			result = multierror.Append(result, fmt.Errorf(
+				"Port or SocketPath must be set for a Connect proxy"))
 		}
 
 		if s.Connect.Native {
@@ -1179,30 +1240,23 @@ func (s *NodeService) Validate() error {
 			}
 			upstreamKeys[uk] = struct{}{}
 
-			addr := u.LocalBindAddress
-			if addr == "" {
-				addr = "127.0.0.1"
-			}
-			addr = net.JoinHostPort(addr, fmt.Sprintf("%d", u.LocalBindPort))
+			addr := u.UpstreamAddressToString()
 
-			if _, ok := bindAddrs[addr]; ok {
+			// Centrally configured upstreams will fail this check if there are multiple because they do not have an address/port.
+			// Only consider non-centrally configured upstreams in this check since those are the ones we create listeners for.
+			if _, ok := bindAddrs[addr]; ok && !u.CentrallyConfigured {
 				result = multierror.Append(result, fmt.Errorf(
-					"upstreams cannot contain duplicates by local bind address and port; %q is specified twice", addr))
+					"upstreams cannot contain duplicates by local bind address and port or unix path; %q is specified twice", addr))
 				continue
 			}
 			bindAddrs[addr] = struct{}{}
 		}
-		var knownPaths = make(map[string]bool)
+
 		var knownListeners = make(map[int]bool)
 		for _, path := range s.Proxy.Expose.Paths {
 			if path.Path == "" {
 				result = multierror.Append(result, fmt.Errorf("expose.paths: empty path exposed"))
 			}
-
-			if seen := knownPaths[path.Path]; seen {
-				result = multierror.Append(result, fmt.Errorf("expose.paths: duplicate paths exposed"))
-			}
-			knownPaths[path.Path] = true
 
 			if seen := knownListeners[path.ListenerPort]; seen {
 				result = multierror.Append(result, fmt.Errorf("expose.paths: duplicate listener ports exposed"))
@@ -1255,6 +1309,10 @@ func (s *NodeService) Validate() error {
 			result = multierror.Append(result, fmt.Errorf("The Proxy.LocalServicePort configuration is invalid for a %s", s.Kind))
 		}
 
+		if s.Proxy.LocalServiceSocketPath != "" {
+			result = multierror.Append(result, fmt.Errorf("The Proxy.LocalServiceSocketPath configuration is invalid for a %s", s.Kind))
+		}
+
 		if len(s.Proxy.Upstreams) != 0 {
 			result = multierror.Append(result, fmt.Errorf("The Proxy.Upstreams configuration is invalid for a %s", s.Kind))
 		}
@@ -1288,6 +1346,7 @@ func (s *NodeService) IsSame(other *NodeService) bool {
 		!reflect.DeepEqual(s.Tags, other.Tags) ||
 		s.Address != other.Address ||
 		s.Port != other.Port ||
+		s.SocketPath != other.SocketPath ||
 		!reflect.DeepEqual(s.TaggedAddresses, other.TaggedAddresses) ||
 		!reflect.DeepEqual(s.Weights, other.Weights) ||
 		!reflect.DeepEqual(s.Meta, other.Meta) ||
@@ -1359,6 +1418,7 @@ func (s *NodeService) ToServiceNode(node string) *ServiceNode {
 		ServiceAddress:           s.Address,
 		ServiceTaggedAddresses:   s.TaggedAddresses,
 		ServicePort:              s.Port,
+		ServiceSocketPath:        s.SocketPath,
 		ServiceMeta:              s.Meta,
 		ServiceWeights:           theWeights,
 		ServiceEnableTagOverride: s.EnableTagOverride,
@@ -1382,7 +1442,7 @@ type NodeServiceList struct {
 	Services []*NodeService
 }
 
-// HealthCheck represents a single check on a given node
+// HealthCheck represents a single check on a given node.
 type HealthCheck struct {
 	Node        string
 	CheckID     types.CheckID // Unique per-node ID
@@ -1395,11 +1455,19 @@ type HealthCheck struct {
 	ServiceTags []string      // optional service tags
 	Type        string        // Check type: http/ttl/tcp/etc
 
+	// ExposedPort is the port of the exposed Envoy listener representing the
+	// HTTP or GRPC health check of the service.
+	ExposedPort int
+
 	Definition HealthCheckDefinition `bexpr:"-"`
 
 	EnterpriseMeta `hcl:",squash" mapstructure:",squash" bexpr:"-"`
 
 	RaftIndex `bexpr:"-"`
+}
+
+func (hc *HealthCheck) NodeIdentity() Identity {
+	return Identity{ID: hc.Node}
 }
 
 func (hc *HealthCheck) CompoundServiceID() ServiceID {
@@ -1429,11 +1497,13 @@ func (hc *HealthCheck) CompoundCheckID() CheckID {
 
 type HealthCheckDefinition struct {
 	HTTP                           string              `json:",omitempty"`
+	TLSServerName                  string              `json:",omitempty"`
 	TLSSkipVerify                  bool                `json:",omitempty"`
 	Header                         map[string][]string `json:",omitempty"`
 	Method                         string              `json:",omitempty"`
 	Body                           string              `json:",omitempty"`
 	TCP                            string              `json:",omitempty"`
+	H2PING                         string              `json:",omitempty"`
 	Interval                       time.Duration       `json:",omitempty"`
 	OutputMaxSize                  uint                `json:",omitempty"`
 	Timeout                        time.Duration       `json:",omitempty"`
@@ -1580,9 +1650,11 @@ func (c *HealthCheck) CheckType() *CheckType {
 		Method:                         c.Definition.Method,
 		Body:                           c.Definition.Body,
 		TCP:                            c.Definition.TCP,
+		H2PING:                         c.Definition.H2PING,
 		Interval:                       c.Definition.Interval,
 		DockerContainerID:              c.Definition.DockerContainerID,
 		Shell:                          c.Definition.Shell,
+		TLSServerName:                  c.Definition.TLSServerName,
 		TLSSkipVerify:                  c.Definition.TLSSkipVerify,
 		Timeout:                        c.Definition.Timeout,
 		TTL:                            c.Definition.TTL,
@@ -1905,6 +1977,17 @@ type ServiceTopology struct {
 
 	// MetricsProtocol is the protocol of the service being queried
 	MetricsProtocol string
+
+	// TransparentProxy describes whether all instances of the proxy
+	// service are in transparent mode.
+	TransparentProxy bool
+
+	// (Up|Down)streamSources are maps with labels for why each service is being
+	// returned. Services can be upstreams or downstreams due to
+	// explicit upstream definition or various types of intention policies:
+	// specific, wildcard, or default allow.
+	UpstreamSources   map[string]string
+	DownstreamSources map[string]string
 }
 
 // IndexedConfigEntries has its own encoding logic which differs from
@@ -2463,19 +2546,4 @@ func (m MessageType) String() string {
 	}
 	return "Unknown(" + strconv.Itoa(int(m)) + ")"
 
-}
-
-// UpstreamDownstream pairs come from individual proxy registrations, which can be updated independently.
-type UpstreamDownstream struct {
-	Upstream   ServiceName
-	Downstream ServiceName
-
-	// Refs stores the registrations that contain this pairing.
-	// When there are no remaining Refs, the UpstreamDownstream can be deleted.
-	//
-	// Note: This map must be treated as immutable when accessed in MemDB.
-	//       The entire UpstreamDownstream structure must be deep copied on updates.
-	Refs map[string]struct{}
-
-	RaftIndex
 }

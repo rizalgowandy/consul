@@ -46,7 +46,23 @@ func (m *EnterpriseMeta) NamespaceOrDefault() string {
 	return IntentionDefaultNamespace
 }
 
+func NamespaceOrDefault(_ string) string {
+	return IntentionDefaultNamespace
+}
+
 func (m *EnterpriseMeta) NamespaceOrEmpty() string {
+	return ""
+}
+
+func (m *EnterpriseMeta) PartitionOrDefault() string {
+	return ""
+}
+
+func PartitionOrDefault(_ string) string {
+	return ""
+}
+
+func (m *EnterpriseMeta) PartitionOrEmpty() string {
 	return ""
 }
 
@@ -149,4 +165,12 @@ func (s *Session) CheckIDs() []types.CheckID {
 		checks = append(checks, types.CheckID(c.ID))
 	}
 	return checks
+}
+
+func (t *Intention) HasWildcardSource() bool {
+	return t.SourceName == WildcardSpecifier
+}
+
+func (t *Intention) HasWildcardDestination() bool {
+	return t.DestinationName == WildcardSpecifier
 }

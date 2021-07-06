@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -331,9 +332,11 @@ func (b *builder) Build() (rt RuntimeConfig, err error) {
 
 		var unusedErr error
 		for _, k := range md.Unused {
-			switch k {
-			case "acl_enforce_version_8":
+			switch {
+			case k == "acl_enforce_version_8":
 				b.warn("config key %q is deprecated and should be removed", k)
+			case strings.HasPrefix(k, "audit.sink[") && strings.HasSuffix(k, "].name"):
+				b.warn("config key audit.sink[].name is deprecated and should be removed")
 			default:
 				unusedErr = multierror.Append(unusedErr, fmt.Errorf("invalid config key %s", k))
 			}
@@ -666,7 +669,6 @@ func (b *builder) Build() (rt RuntimeConfig, err error) {
 
 	// autoEncrypt and autoConfig implicitly turns on connect which is why
 	// they need to be above other settings that rely on connect.
-	autoEncryptTLS := boolVal(c.AutoEncrypt.TLS)
 	autoEncryptDNSSAN := []string{}
 	for _, d := range c.AutoEncrypt.DNSSAN {
 		autoEncryptDNSSAN = append(autoEncryptDNSSAN, d)
@@ -682,13 +684,8 @@ func (b *builder) Build() (rt RuntimeConfig, err error) {
 
 	}
 	autoEncryptAllowTLS := boolVal(c.AutoEncrypt.AllowTLS)
-
-	if autoEncryptAllowTLS {
-		connectEnabled = true
-	}
-
 	autoConfig := b.autoConfigVal(c.AutoConfig)
-	if autoConfig.Enabled {
+	if autoEncryptAllowTLS || autoConfig.Enabled {
 		connectEnabled = true
 	}
 
@@ -981,7 +978,7 @@ func (b *builder) Build() (rt RuntimeConfig, err error) {
 		Checks:                                 checks,
 		ClientAddrs:                            clientAddrs,
 		ConfigEntryBootstrap:                   configEntries,
-		AutoEncryptTLS:                         autoEncryptTLS,
+		AutoEncryptTLS:                         boolVal(c.AutoEncrypt.TLS),
 		AutoEncryptDNSSAN:                      autoEncryptDNSSAN,
 		AutoEncryptIPSAN:                       autoEncryptIPSAN,
 		AutoEncryptAllowTLS:                    autoEncryptAllowTLS,
@@ -1102,7 +1099,7 @@ func (b *builder) Build() (rt RuntimeConfig, err error) {
 		Watches:                     c.Watches,
 	}
 
-	rt.UseStreamingBackend = boolVal(c.UseStreamingBackend)
+	rt.UseStreamingBackend = boolValWithDefault(c.UseStreamingBackend, true)
 
 	if rt.Cache.EntryFetchMaxBurst <= 0 {
 		return RuntimeConfig{}, fmt.Errorf("cache.entry_fetch_max_burst must be strictly positive, was: %v", rt.Cache.EntryFetchMaxBurst)
@@ -1571,6 +1568,7 @@ func (b *builder) checkVal(v *CheckDefinition) *structs.CheckDefinition {
 		Shell:                          stringVal(v.Shell),
 		GRPC:                           stringVal(v.GRPC),
 		GRPCUseTLS:                     boolVal(v.GRPCUseTLS),
+		TLSServerName:                  stringVal(v.TLSServerName),
 		TLSSkipVerify:                  boolVal(v.TLSSkipVerify),
 		AliasNode:                      stringVal(v.AliasNode),
 		AliasService:                   stringVal(v.AliasService),
@@ -1578,6 +1576,7 @@ func (b *builder) checkVal(v *CheckDefinition) *structs.CheckDefinition {
 		TTL:                            b.durationVal(fmt.Sprintf("check[%s].ttl", id), v.TTL),
 		SuccessBeforePassing:           intVal(v.SuccessBeforePassing),
 		FailuresBeforeCritical:         intVal(v.FailuresBeforeCritical),
+		H2PING:                         stringVal(v.H2PING),
 		DeregisterCriticalServiceAfter: b.durationVal(fmt.Sprintf("check[%s].deregister_critical_service_after", id), v.DeregisterCriticalServiceAfter),
 		OutputMaxSize:                  intValWithDefault(v.OutputMaxSize, checks.DefaultBufSize),
 		EnterpriseMeta:                 v.EnterpriseMeta.ToStructs(),
@@ -1638,6 +1637,14 @@ func (b *builder) serviceVal(v *ServiceDefinition) *structs.ServiceDefinition {
 	if err := structs.ValidateWeights(serviceWeights); err != nil {
 		b.err = multierror.Append(fmt.Errorf("Invalid weight definition for service %s: %s", stringVal(v.Name), err))
 	}
+
+	if (v.Port != nil || v.Address != nil) && (v.SocketPath != nil) {
+		b.err = multierror.Append(
+			fmt.Errorf("service %s cannot have both socket path %s and address/port",
+				stringVal(v.Name), stringVal(v.SocketPath)), b.err)
+
+	}
+
 	return &structs.ServiceDefinition{
 		Kind:              kind,
 		ID:                stringVal(v.ID),
@@ -1647,6 +1654,7 @@ func (b *builder) serviceVal(v *ServiceDefinition) *structs.ServiceDefinition {
 		TaggedAddresses:   b.svcTaggedAddresses(v.TaggedAddresses),
 		Meta:              meta,
 		Port:              intVal(v.Port),
+		SocketPath:        stringVal(v.SocketPath),
 		Token:             stringVal(v.Token),
 		EnableTagOverride: boolVal(v.EnableTagOverride),
 		Weights:           serviceWeights,
@@ -1685,10 +1693,13 @@ func (b *builder) serviceProxyVal(v *ServiceProxy) *structs.ConnectProxyConfig {
 		DestinationServiceID:   stringVal(v.DestinationServiceID),
 		LocalServiceAddress:    stringVal(v.LocalServiceAddress),
 		LocalServicePort:       intVal(v.LocalServicePort),
+		LocalServiceSocketPath: stringVal(&v.LocalServiceSocketPath),
 		Config:                 v.Config,
 		Upstreams:              b.upstreamsVal(v.Upstreams),
 		MeshGateway:            b.meshGatewayConfVal(v.MeshGateway),
 		Expose:                 b.exposeConfVal(v.Expose),
+		Mode:                   b.proxyModeVal(v.Mode),
+		TransparentProxy:       b.transparentProxyConfVal(v.TransparentProxy),
 	}
 }
 
@@ -1702,6 +1713,8 @@ func (b *builder) upstreamsVal(v []Upstream) structs.Upstreams {
 			Datacenter:           stringVal(u.Datacenter),
 			LocalBindAddress:     stringVal(u.LocalBindAddress),
 			LocalBindPort:        intVal(u.LocalBindPort),
+			LocalBindSocketPath:  stringVal(u.LocalBindSocketPath),
+			LocalBindSocketMode:  b.unixPermissionsVal("local_bind_socket_mode", u.LocalBindSocketMode),
 			Config:               u.Config,
 			MeshGateway:          b.meshGatewayConfVal(u.MeshGateway),
 		}
@@ -1738,6 +1751,29 @@ func (b *builder) exposeConfVal(v *ExposeConfig) structs.ExposeConfig {
 	out.Checks = boolVal(v.Checks)
 	out.Paths = b.pathsVal(v.Paths)
 	return out
+}
+
+func (b *builder) transparentProxyConfVal(tproxyConf *TransparentProxyConfig) structs.TransparentProxyConfig {
+	var out structs.TransparentProxyConfig
+	if tproxyConf == nil {
+		return out
+	}
+
+	out.OutboundListenerPort = intVal(tproxyConf.OutboundListenerPort)
+	out.DialedDirectly = boolVal(tproxyConf.DialedDirectly)
+	return out
+}
+
+func (b *builder) proxyModeVal(v *string) structs.ProxyMode {
+	if v == nil {
+		return structs.ProxyModeDefault
+	}
+
+	mode, err := structs.ValidateProxyMode(*v)
+	if err != nil {
+		b.err = multierror.Append(b.err, err)
+	}
+	return mode
 }
 
 func (b *builder) pathsVal(v []ExposePath) []structs.ExposePath {
@@ -1864,6 +1900,18 @@ func uint64Val(v *uint64) uint64 {
 		return 0
 	}
 	return *v
+}
+
+// Expect an octal permissions string, e.g. 0644
+func (b *builder) unixPermissionsVal(name string, v *string) string {
+	if v == nil {
+		return ""
+	}
+	if _, err := strconv.ParseUint(*v, 8, 32); err == nil {
+		return *v
+	}
+	b.err = multierror.Append(b.err, fmt.Errorf("%s: invalid mode: %s", name, *v))
+	return "0"
 }
 
 func (b *builder) portVal(name string, v *int) int {

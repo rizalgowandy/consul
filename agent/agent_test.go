@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/time/rate"
+	"google.golang.org/grpc"
 	"gopkg.in/square/go-jose.v2/jwt"
 
 	"github.com/hashicorp/consul/agent/cache"
@@ -307,6 +306,7 @@ func TestAgent_HTTPMaxHeaderBytes(t *testing.T) {
 					Logger:          hclog.NewInterceptLogger(nil),
 					Tokens:          new(token.Store),
 					TLSConfigurator: tlsConf,
+					GRPCConnPool:    &fakeGRPCConnPool{},
 				},
 				RuntimeConfig: &config.RuntimeConfig{
 					HTTPAddrs: []net.Addr{
@@ -316,8 +316,13 @@ func TestAgent_HTTPMaxHeaderBytes(t *testing.T) {
 				},
 				Cache: cache.New(cache.Options{}),
 			}
+			bd, err = initEnterpriseBaseDeps(bd, nil)
+			require.NoError(t, err)
+
 			a, err := New(bd)
 			require.NoError(t, err)
+
+			a.startLicenseManager(testutil.TestContext(t))
 
 			srvs, err := a.listenHTTP()
 			require.NoError(t, err)
@@ -353,6 +358,12 @@ func TestAgent_HTTPMaxHeaderBytes(t *testing.T) {
 			}
 		})
 	}
+}
+
+type fakeGRPCConnPool struct{}
+
+func (f fakeGRPCConnPool) ClientConn(_ string) (*grpc.ClientConn, error) {
+	return nil, nil
 }
 
 func TestAgent_ReconnectConfigWanDisabled(t *testing.T) {
@@ -811,6 +822,31 @@ func TestAgent_CheckAliasRPC(t *testing.T) {
 	}
 }
 
+func TestAgent_AddServiceWithH2PINGCheck(t *testing.T) {
+	t.Parallel()
+	a := NewTestAgent(t, "")
+	defer a.Shutdown()
+	check := []*structs.CheckType{
+		{
+			CheckID:       "test-h2ping-check",
+			Name:          "test-h2ping-check",
+			H2PING:        "localhost:12345",
+			TLSSkipVerify: true,
+			Interval:      10 * time.Second,
+		},
+	}
+
+	nodeService := &structs.NodeService{
+		ID:      "test-h2ping-check-service",
+		Service: "test-h2ping-check-service",
+	}
+	err := a.addServiceFromSource(nodeService, check, false, "", ConfigSourceLocal)
+	if err != nil {
+		t.Fatalf("Error registering service: %v", err)
+	}
+	requireCheckExists(t, a, "test-h2ping-check")
+}
+
 func TestAgent_AddServiceNoExec(t *testing.T) {
 	if testing.Short() {
 		t.Skip("too slow for testing.Short")
@@ -896,110 +932,6 @@ func testAgent_AddServiceNoRemoteExec(t *testing.T, extraHCL string) {
 	err := a.addServiceFromSource(srv, []*structs.CheckType{chk}, false, "", ConfigSourceRemote)
 	if err == nil || !strings.Contains(err.Error(), "Scripts are disabled on this agent") {
 		t.Fatalf("err: %v", err)
-	}
-}
-
-func TestCacheRateLimit(t *testing.T) {
-	if testing.Short() {
-		t.Skip("too slow for testing.Short")
-	}
-
-	t.Parallel()
-	tests := []struct {
-		// count := number of updates performed (1 every 10ms)
-		count int
-		// rateLimit rate limiting of cache
-		rateLimit float64
-		// Minimum number of updates to see from a cache perspective
-		// We add a value with tolerance to work even on a loaded CI
-		minUpdates int
-	}{
-		// 250 => we have a test running for at least 2.5s
-		{250, 0.5, 1},
-		{250, 1, 1},
-		{300, 2, 2},
-	}
-	for _, currentTest := range tests {
-		t.Run(fmt.Sprintf("rate_limit_at_%v", currentTest.rateLimit), func(t *testing.T) {
-			tt := currentTest
-			t.Parallel()
-			a := NewTestAgent(t, "cache = { entry_fetch_rate = 1, entry_fetch_max_burst = 100 }")
-			defer a.Shutdown()
-			testrpc.WaitForTestAgent(t, a.RPC, "dc1")
-
-			cfg := a.config
-			require.Equal(t, rate.Limit(1), a.config.Cache.EntryFetchRate)
-			require.Equal(t, 100, a.config.Cache.EntryFetchMaxBurst)
-			cfg.Cache.EntryFetchRate = rate.Limit(tt.rateLimit)
-			cfg.Cache.EntryFetchMaxBurst = 1
-			a.reloadConfigInternal(cfg)
-			require.Equal(t, rate.Limit(tt.rateLimit), a.config.Cache.EntryFetchRate)
-			require.Equal(t, 1, a.config.Cache.EntryFetchMaxBurst)
-			var wg sync.WaitGroup
-			stillProcessing := true
-
-			injectService := func(i int) {
-				srv := &structs.NodeService{
-					Service: "redis",
-					ID:      "redis",
-					Port:    1024 + i,
-					Address: fmt.Sprintf("10.0.1.%d", i%255),
-				}
-
-				err := a.addServiceFromSource(srv, []*structs.CheckType{}, false, "", ConfigSourceRemote)
-				require.Nil(t, err)
-			}
-
-			runUpdates := func() {
-				wg.Add(tt.count)
-				for i := 0; i < tt.count; i++ {
-					time.Sleep(10 * time.Millisecond)
-					injectService(i)
-					wg.Done()
-				}
-				stillProcessing = false
-			}
-
-			getIndex := func(t *testing.T, oldIndex int) int {
-				req, err := http.NewRequest("GET", fmt.Sprintf("/v1/health/service/redis?cached&wait=5s&index=%d", oldIndex), nil)
-				require.NoError(t, err)
-
-				resp := httptest.NewRecorder()
-				a.srv.handler(false).ServeHTTP(resp, req)
-				// Key doesn't actually exist so we should get 404
-				if got, want := resp.Code, http.StatusOK; got != want {
-					t.Fatalf("bad response code got %d want %d", got, want)
-				}
-				index, err := strconv.Atoi(resp.Header().Get("X-Consul-Index"))
-				require.NoError(t, err)
-				return index
-			}
-
-			{
-				start := time.Now()
-				injectService(0)
-				// Get the first index
-				index := getIndex(t, 0)
-				require.Greater(t, index, 2)
-				go runUpdates()
-				numberOfUpdates := 0
-				for stillProcessing {
-					oldIndex := index
-					index = getIndex(t, oldIndex)
-					require.GreaterOrEqual(t, index, oldIndex, "index must be increasing only")
-					numberOfUpdates++
-				}
-				elapsed := time.Since(start)
-				qps := float64(time.Second) * float64(numberOfUpdates) / float64(elapsed)
-				summary := fmt.Sprintf("received %v updates in %v aka %f qps, target max was: %f qps", numberOfUpdates, elapsed, qps, tt.rateLimit)
-
-				// We must never go beyond the limit, we give 10% margin to avoid having values like 1.05 instead of 1 due to precision of clock
-				require.LessOrEqual(t, qps, 1.1*tt.rateLimit, fmt.Sprintf("it should never get more requests than ratelimit, had: %s", summary))
-				// We must have at least being notified a few times
-				require.GreaterOrEqual(t, numberOfUpdates, tt.minUpdates, fmt.Sprintf("It should have received a minimum of %d updates, had: %s", tt.minUpdates, summary))
-			}
-			wg.Wait()
-		})
 	}
 }
 
@@ -1356,6 +1288,7 @@ func TestAgent_IndexChurn(t *testing.T) {
 // verifyIndexChurn registers some things and runs anti-entropy a bunch of times
 // in a row to make sure there are no index bumps.
 func verifyIndexChurn(t *testing.T, tags []string) {
+	t.Helper()
 	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
@@ -4266,8 +4199,8 @@ func TestAgent_RerouteExistingHTTPChecks(t *testing.T) {
 		t.Fatalf("failed to add svc: %v", err)
 	}
 
-	// Register a proxy and expose HTTP checks
-	// This should trigger setting ProxyHTTP and ProxyGRPC in the checks
+	// Register a proxy and expose HTTP checks.
+	// This should trigger setting ProxyHTTP and ProxyGRPC in the checks.
 	proxy := &structs.NodeService{
 		Kind:    "connect-proxy",
 		ID:      "web-proxy",
@@ -4291,36 +4224,30 @@ func TestAgent_RerouteExistingHTTPChecks(t *testing.T) {
 
 	retry.Run(t, func(r *retry.R) {
 		chks := a.ServiceHTTPBasedChecks(structs.NewServiceID("web", nil))
+		require.Equal(r, chks[0].ProxyHTTP, "http://localhost:21500/mypath?query")
+	})
 
-		got := chks[0].ProxyHTTP
-		if got == "" {
-			r.Fatal("proxyHTTP addr not set in check")
-		}
-
-		want := "http://localhost:21500/mypath?query"
-		if got != want {
-			r.Fatalf("unexpected proxy addr in check, want: %s, got: %s", want, got)
-		}
+	retry.Run(t, func(r *retry.R) {
+		hc := a.State.Check(structs.NewCheckID("http", nil))
+		require.Equal(r, hc.ExposedPort, 21500)
 	})
 
 	retry.Run(t, func(r *retry.R) {
 		chks := a.ServiceHTTPBasedChecks(structs.NewServiceID("web", nil))
 
-		// Will be at a later index than HTTP check because of the fetching order in ServiceHTTPBasedChecks
-		got := chks[1].ProxyGRPC
-		if got == "" {
-			r.Fatal("ProxyGRPC addr not set in check")
-		}
-
-		// Node that this relies on listener ports auto-incrementing in a.listenerPortLocked
-		want := "localhost:21501/myservice"
-		if got != want {
-			r.Fatalf("unexpected proxy addr in check, want: %s, got: %s", want, got)
-		}
+		// GRPC check will be at a later index than HTTP check because of the fetching order in ServiceHTTPBasedChecks.
+		// Note that this relies on listener ports auto-incrementing in a.listenerPortLocked.
+		require.Equal(r, chks[1].ProxyGRPC, "localhost:21501/myservice")
 	})
 
-	// Re-register a proxy and disable exposing HTTP checks
+	retry.Run(t, func(r *retry.R) {
+		hc := a.State.Check(structs.NewCheckID("grpc", nil))
+		require.Equal(r, hc.ExposedPort, 21501)
+	})
+
+	// Re-register a proxy and disable exposing HTTP checks.
 	// This should trigger resetting ProxyHTTP and ProxyGRPC to empty strings
+	// and reset saved exposed ports in the agent's state.
 	proxy = &structs.NodeService{
 		Kind:    "connect-proxy",
 		ID:      "web-proxy",
@@ -4344,21 +4271,24 @@ func TestAgent_RerouteExistingHTTPChecks(t *testing.T) {
 
 	retry.Run(t, func(r *retry.R) {
 		chks := a.ServiceHTTPBasedChecks(structs.NewServiceID("web", nil))
+		require.Empty(r, chks[0].ProxyHTTP, "ProxyHTTP addr was not reset")
+	})
 
-		got := chks[0].ProxyHTTP
-		if got != "" {
-			r.Fatal("ProxyHTTP addr was not reset")
-		}
+	retry.Run(t, func(r *retry.R) {
+		hc := a.State.Check(structs.NewCheckID("http", nil))
+		require.Equal(r, hc.ExposedPort, 0)
 	})
 
 	retry.Run(t, func(r *retry.R) {
 		chks := a.ServiceHTTPBasedChecks(structs.NewServiceID("web", nil))
 
-		// Will be at a later index than HTTP check because of the fetching order in ServiceHTTPBasedChecks
-		got := chks[1].ProxyGRPC
-		if got != "" {
-			r.Fatal("ProxyGRPC addr was not reset")
-		}
+		// Will be at a later index than HTTP check because of the fetching order in ServiceHTTPBasedChecks.
+		require.Empty(r, chks[1].ProxyGRPC, "ProxyGRPC addr was not reset")
+	})
+
+	retry.Run(t, func(r *retry.R) {
+		hc := a.State.Check(structs.NewCheckID("grpc", nil))
+		require.Equal(r, hc.ExposedPort, 0)
 	})
 }
 
@@ -4447,31 +4377,24 @@ func TestAgent_RerouteNewHTTPChecks(t *testing.T) {
 
 	retry.Run(t, func(r *retry.R) {
 		chks := a.ServiceHTTPBasedChecks(structs.NewServiceID("web", nil))
+		require.Equal(r, chks[0].ProxyHTTP, "http://localhost:21500/mypath?query")
+	})
 
-		got := chks[0].ProxyHTTP
-		if got == "" {
-			r.Fatal("ProxyHTTP addr not set in check")
-		}
-
-		want := "http://localhost:21500/mypath?query"
-		if got != want {
-			r.Fatalf("unexpected proxy addr in http check, want: %s, got: %s", want, got)
-		}
+	retry.Run(t, func(r *retry.R) {
+		hc := a.State.Check(structs.NewCheckID("http", nil))
+		require.Equal(r, hc.ExposedPort, 21500)
 	})
 
 	retry.Run(t, func(r *retry.R) {
 		chks := a.ServiceHTTPBasedChecks(structs.NewServiceID("web", nil))
 
-		// Will be at a later index than HTTP check because of the fetching order in ServiceHTTPBasedChecks
-		got := chks[1].ProxyGRPC
-		if got == "" {
-			r.Fatal("ProxyGRPC addr not set in check")
-		}
+		// GRPC check will be at a later index than HTTP check because of the fetching order in ServiceHTTPBasedChecks.
+		require.Equal(r, chks[1].ProxyGRPC, "localhost:21501/myservice")
+	})
 
-		want := "localhost:21501/myservice"
-		if got != want {
-			r.Fatalf("unexpected proxy addr in grpc check, want: %s, got: %s", want, got)
-		}
+	retry.Run(t, func(r *retry.R) {
+		hc := a.State.Check(structs.NewCheckID("grpc", nil))
+		require.Equal(r, hc.ExposedPort, 21501)
 	})
 }
 
@@ -5089,10 +5012,9 @@ func TestAgent_AutoEncrypt(t *testing.T) {
 		Datacenter: "dc1",
 		Agent:      "test-client",
 	}
-	expectedCN := connect.AgentCN("test-client", connect.TestClusterID)
 	x509Cert, err := x509.ParseCertificate(aeCert.Certificate[0])
 	require.NoError(t, err)
-	require.Equal(t, expectedCN, x509Cert.Subject.CommonName)
+	require.Empty(t, x509Cert.Subject.CommonName)
 	require.Len(t, x509Cert.URIs, 1)
 	require.Equal(t, id.URI(), x509Cert.URIs[0])
 }
@@ -5148,6 +5070,7 @@ func TestAgent_ListenHTTP_MultipleAddresses(t *testing.T) {
 			Logger:          hclog.NewInterceptLogger(nil),
 			Tokens:          new(token.Store),
 			TLSConfigurator: tlsConf,
+			GRPCConnPool:    &fakeGRPCConnPool{},
 		},
 		RuntimeConfig: &config.RuntimeConfig{
 			HTTPAddrs: []net.Addr{
@@ -5157,8 +5080,14 @@ func TestAgent_ListenHTTP_MultipleAddresses(t *testing.T) {
 		},
 		Cache: cache.New(cache.Options{}),
 	}
+
+	bd, err = initEnterpriseBaseDeps(bd, nil)
+	require.NoError(t, err)
+
 	agent, err := New(bd)
 	require.NoError(t, err)
+
+	agent.startLicenseManager(testutil.TestContext(t))
 
 	srvs, err := agent.listenHTTP()
 	require.NoError(t, err)

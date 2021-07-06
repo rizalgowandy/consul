@@ -14,14 +14,6 @@ import (
 
 	"github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
-	"github.com/hashicorp/consul/acl"
-	"github.com/hashicorp/consul/agent/consul/state"
-	"github.com/hashicorp/consul/agent/consul/wanfed"
-	"github.com/hashicorp/consul/agent/metadata"
-	"github.com/hashicorp/consul/agent/pool"
-	"github.com/hashicorp/consul/agent/structs"
-	"github.com/hashicorp/consul/lib"
-	"github.com/hashicorp/consul/logging"
 	connlimit "github.com/hashicorp/go-connlimit"
 	"github.com/hashicorp/go-hclog"
 	memdb "github.com/hashicorp/go-memdb"
@@ -30,6 +22,15 @@ import (
 	msgpackrpc "github.com/hashicorp/net-rpc-msgpackrpc"
 	"github.com/hashicorp/raft"
 	"github.com/hashicorp/yamux"
+
+	"github.com/hashicorp/consul/acl"
+	"github.com/hashicorp/consul/agent/consul/state"
+	"github.com/hashicorp/consul/agent/consul/wanfed"
+	"github.com/hashicorp/consul/agent/metadata"
+	"github.com/hashicorp/consul/agent/pool"
+	"github.com/hashicorp/consul/agent/structs"
+	"github.com/hashicorp/consul/lib"
+	"github.com/hashicorp/consul/logging"
 )
 
 var RPCCounters = []prometheus.CounterDefinition{
@@ -55,7 +56,7 @@ var RPCCounters = []prometheus.CounterDefinition{
 	},
 	{
 		Name: []string{"rpc", "query"},
-		Help: "Increments when a server receives a new blocking RPC request, indicating the rate of new blocking query calls.",
+		Help: "Increments when a server receives a read request, indicating the rate of new read queries.",
 	},
 }
 
@@ -74,12 +75,6 @@ var RPCSummaries = []prometheus.SummaryDefinition{
 }
 
 const (
-	// jitterFraction is a the limit to the amount of jitter we apply
-	// to a user specified MaxQueryTime. We divide the specified time by
-	// the fraction. So 16 == 6.25% limit of jitter. This same fraction
-	// is applied to the RPCHoldTimeout
-	jitterFraction = 16
-
 	// Warn if the Raft command is larger than this.
 	// If it's over 1MB something is probably being abusive.
 	raftWarnSize = 1024 * 1024
@@ -91,9 +86,7 @@ const (
 	enqueueLimit = 30 * time.Second
 )
 
-var (
-	ErrChunkingResubmit = errors.New("please resubmit call for rechunking")
-)
+var ErrChunkingResubmit = errors.New("please resubmit call for rechunking")
 
 func (s *Server) rpcLogger() hclog.Logger {
 	return s.loggers.Named(logging.RPC)
@@ -526,34 +519,35 @@ func (c *limitedConn) Read(b []byte) (n int, err error) {
 	return c.lr.Read(b)
 }
 
-// canRetry returns true if the given situation is safe for a retry.
-func canRetry(args interface{}, err error) bool {
+// canRetry returns true if the request and error indicate that a retry is safe.
+func canRetry(info structs.RPCInfo, err error, start time.Time, config *Config) bool {
+	if info != nil && info.HasTimedOut(start, config.RPCHoldTimeout, config.MaxQueryTime, config.DefaultQueryTime) {
+		// RPCInfo timeout may include extra time for MaxQueryTime
+		return false
+	} else if info == nil && time.Since(start) > config.RPCHoldTimeout {
+		// When not RPCInfo, timeout is only RPCHoldTimeout
+		return false
+	}
 	// No leader errors are always safe to retry since no state could have
 	// been changed.
 	if structs.IsErrNoLeader(err) {
 		return true
 	}
 
-	// If we are chunking and it doesn't seem to have completed, try again
-	intErr, ok := args.(error)
-	if ok && strings.Contains(intErr.Error(), ErrChunkingResubmit.Error()) {
+	// If we are chunking and it doesn't seem to have completed, try again.
+	if err != nil && strings.Contains(err.Error(), ErrChunkingResubmit.Error()) {
 		return true
 	}
 
 	// Reads are safe to retry for stream errors, such as if a server was
 	// being shut down.
-	info, ok := args.(structs.RPCInfo)
-	if ok && info.IsRead() && lib.IsErrEOF(err) {
-		return true
-	}
-
-	return false
+	return info != nil && info.IsRead() && lib.IsErrEOF(err)
 }
 
 // ForwardRPC is used to forward an RPC request to a remote DC or to the local leader
 // Returns a bool of if forwarding was performed, as well as any error
-func (s *Server) ForwardRPC(method string, info structs.RPCInfo, args interface{}, reply interface{}) (bool, error) {
-	var firstCheck time.Time
+func (s *Server) ForwardRPC(method string, info structs.RPCInfo, reply interface{}) (bool, error) {
+	firstCheck := time.Now()
 
 	// Handle DC forwarding
 	dc := info.RequestDatacenter()
@@ -575,7 +569,7 @@ func (s *Server) ForwardRPC(method string, info structs.RPCInfo, args interface{
 			}
 		}
 
-		err := s.forwardDC(method, dc, args, reply)
+		err := s.forwardDC(method, dc, info, reply)
 		return true, err
 	}
 
@@ -603,20 +597,15 @@ CHECK_LEADER:
 	// Handle the case of a known leader
 	if leader != nil {
 		rpcErr = s.connPool.RPC(s.config.Datacenter, leader.ShortName, leader.Addr,
-			method, args, reply)
-		if rpcErr != nil && canRetry(info, rpcErr) {
-			goto RETRY
+			method, info, reply)
+		if rpcErr == nil {
+			return true, nil
 		}
-		return true, rpcErr
 	}
 
-RETRY:
-	// Gate the request until there is a leader
-	if firstCheck.IsZero() {
-		firstCheck = time.Now()
-	}
-	if time.Since(firstCheck) < s.config.RPCHoldTimeout {
-		jitter := lib.RandomStagger(s.config.RPCHoldTimeout / jitterFraction)
+	if retry := canRetry(info, rpcErr, firstCheck, s.config); retry {
+		// Gate the request until there is a leader
+		jitter := lib.RandomStagger(s.config.RPCHoldTimeout / structs.JitterFraction)
 		select {
 		case <-time.After(jitter):
 			goto CHECK_LEADER
@@ -729,28 +718,34 @@ func (s *Server) keyringRPCs(method string, args interface{}, dcs []string) (*st
 
 type raftEncoder func(structs.MessageType, interface{}) ([]byte, error)
 
-// raftApply is used to encode a message, run it through raft, and return
-// the FSM response along with any errors
+// raftApplyMsgpack encodes the msg using msgpack and calls raft.Apply. See
+// raftApplyWithEncoder.
+// Deprecated: use raftApplyMsgpack
 func (s *Server) raftApply(t structs.MessageType, msg interface{}) (interface{}, error) {
 	return s.raftApplyMsgpack(t, msg)
 }
 
-// raftApplyMsgpack will msgpack encode the request and then run it through raft,
-// then return the FSM response along with any errors.
+// raftApplyMsgpack encodes the msg using msgpack and calls raft.Apply. See
+// raftApplyWithEncoder.
 func (s *Server) raftApplyMsgpack(t structs.MessageType, msg interface{}) (interface{}, error) {
 	return s.raftApplyWithEncoder(t, msg, structs.Encode)
 }
 
-// raftApplyProtobuf will protobuf encode the request and then run it through raft,
-// then return the FSM response along with any errors.
+// raftApplyProtobuf encodes the msg using protobuf and calls raft.Apply. See
+// raftApplyWithEncoder.
 func (s *Server) raftApplyProtobuf(t structs.MessageType, msg interface{}) (interface{}, error) {
 	return s.raftApplyWithEncoder(t, msg, structs.EncodeProtoInterface)
 }
 
-// raftApplyWithEncoder is used to encode a message, run it through raft,
-// and return the FSM response along with any errors. Unlike raftApply this
-// takes the encoder to use as an argument.
-func (s *Server) raftApplyWithEncoder(t structs.MessageType, msg interface{}, encoder raftEncoder) (interface{}, error) {
+// raftApplyWithEncoder encodes a message, and then calls raft.Apply with the
+// encoded message. Returns the FSM response along with any errors. If the
+// FSM.Apply response is an error it will be returned as the error return
+// value with a nil response.
+func (s *Server) raftApplyWithEncoder(
+	t structs.MessageType,
+	msg interface{},
+	encoder raftEncoder,
+) (response interface{}, err error) {
 	if encoder == nil {
 		return nil, fmt.Errorf("Failed to encode request: nil encoder")
 	}
@@ -784,22 +779,19 @@ func (s *Server) raftApplyWithEncoder(t structs.MessageType, msg interface{}, en
 		// In this case we didn't apply all chunks successfully, possibly due
 		// to a term change; resubmit
 		if resp == nil {
-			// This returns the error in the interface because the raft library
-			// returns errors from the FSM via the future, not via err from the
-			// apply function. Downstream client code expects to see any error
-			// from the FSM (as opposed to the apply itself) and decide whether
-			// it can retry in the future's response.
-			return ErrChunkingResubmit, nil
+			return nil, ErrChunkingResubmit
 		}
 		// We expect that this conversion should always work
 		chunkedSuccess, ok := resp.(raftchunking.ChunkingSuccess)
 		if !ok {
 			return nil, errors.New("unknown type of response back from chunking FSM")
 		}
-		// Return the inner wrapped response
-		return chunkedSuccess.Response, nil
+		resp = chunkedSuccess.Response
 	}
 
+	if err, ok := resp.(error); ok {
+		return nil, err
+	}
 	return resp, nil
 }
 
@@ -836,7 +828,7 @@ func (s *Server) blockingQuery(queryOpts structs.QueryOptionsCompat, queryMeta s
 	}
 
 	// Apply a small amount of jitter to the request.
-	queryTimeout += lib.RandomStagger(queryTimeout / jitterFraction)
+	queryTimeout += lib.RandomStagger(queryTimeout / structs.JitterFraction)
 
 	// wrap the base context with a deadline
 	ctx, cancel = context.WithDeadline(ctx, time.Now().Add(queryTimeout))
@@ -937,7 +929,7 @@ func (s *Server) consistentRead() error {
 	if s.isReadyForConsistentReads() {
 		return nil
 	}
-	jitter := lib.RandomStagger(s.config.RPCHoldTimeout / jitterFraction)
+	jitter := lib.RandomStagger(s.config.RPCHoldTimeout / structs.JitterFraction)
 	deadline := time.Now().Add(s.config.RPCHoldTimeout)
 
 	for time.Now().Before(deadline) {

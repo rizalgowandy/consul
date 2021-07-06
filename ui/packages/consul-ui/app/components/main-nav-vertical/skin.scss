@@ -8,7 +8,7 @@
   color: inherit;
   font-size: inherit;
 }
-%main-nav-vertical [role="separator"] {
+%main-nav-vertical [role='separator'] {
   @extend %p3;
   text-transform: uppercase;
   font-weight: $typo-weight-medium;
@@ -23,7 +23,10 @@
   background-color: var(--gray-050);
   color: var(--gray-700);
 }
-%main-nav-vertical [role="separator"] {
+%main-nav-vertical li:not([role='separator']) > span {
+  color: var(--gray-300);
+}
+%main-nav-vertical [role='separator'] {
   color: var(--gray-600);
 }
 %main-nav-vertical-action {
@@ -36,6 +39,12 @@
 %main-nav-vertical-action-active {
   background-color: var(--gray-150);
   border-color: var(--gray-999);
+}
+%main-nav-vertical .popover-menu[aria-label]::before {
+  content: attr(aria-label);
+  display: block;
+  margin-top: -0.5rem;
+  margin-bottom: 0.5rem;
 }
 %main-nav-vertical .is-local span:last-of-type {
   @extend %pill-200;

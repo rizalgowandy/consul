@@ -11,10 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mitchellh/hashstructure"
+
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/cache"
 	"github.com/hashicorp/consul/lib"
-	"github.com/mitchellh/hashstructure"
 )
 
 const (
@@ -378,6 +379,8 @@ type ServiceRouteDestination struct {
 	// splitting.
 	Namespace string `json:",omitempty"`
 
+	// NOTE: Partition is not represented here by design. Do not add it.
+
 	// PrefixRewrite allows for the proxied request to have its matching path
 	// prefix modified before being sent to the destination. Described more
 	// below in the envoy implementation section.
@@ -657,6 +660,8 @@ type ServiceSplit struct {
 	// If this field is specified then this route is ineligible for further
 	// splitting.
 	Namespace string `json:",omitempty"`
+
+	// NOTE: Partition is not represented here by design. Do not add it.
 }
 
 // ServiceResolverConfigEntry defines which instances of a service should
@@ -1047,6 +1052,8 @@ type ServiceResolverRedirect struct {
 	// Datacenter is the datacenter to resolve the service from instead of the
 	// current one (optional).
 	Datacenter string `json:",omitempty"`
+
+	// NOTE: Partition is not represented here by design. Do not add it.
 }
 
 // There are some restrictions on what is allowed in here:
@@ -1081,6 +1088,8 @@ type ServiceResolverFailover struct {
 	//
 	// This is a DESTINATION during failover.
 	Datacenters []string `json:",omitempty"`
+
+	// NOTE: Partition is not represented here by design. Do not add it.
 }
 
 // LoadBalancer determines the load balancing policy and configuration for services
@@ -1335,6 +1344,8 @@ type DiscoveryChainRequest struct {
 	EvaluateInDatacenter string
 	EvaluateInNamespace  string
 
+	// NOTE: Partition is not represented here by design. Do not add it.
+
 	// OverrideMeshGateway allows for the mesh gateway setting to be overridden
 	// for any resolver in the compiled chain.
 	OverrideMeshGateway MeshGatewayConfig
@@ -1378,6 +1389,7 @@ func (r *DiscoveryChainRequest) CacheInfo() cache.RequestInfo {
 		OverrideMeshGateway    MeshGatewayConfig
 		OverrideProtocol       string
 		OverrideConnectTimeout time.Duration
+		Filter                 string
 	}{
 		Name:                   r.Name,
 		EvaluateInDatacenter:   r.EvaluateInDatacenter,
@@ -1385,6 +1397,7 @@ func (r *DiscoveryChainRequest) CacheInfo() cache.RequestInfo {
 		OverrideMeshGateway:    r.OverrideMeshGateway,
 		OverrideProtocol:       r.OverrideProtocol,
 		OverrideConnectTimeout: r.OverrideConnectTimeout,
+		Filter:                 r.QueryOptions.Filter,
 	}, nil)
 	if err == nil {
 		// If there is an error, we don't set the key. A blank key forces

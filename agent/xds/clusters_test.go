@@ -14,9 +14,12 @@ import (
 	testinf "github.com/mitchellh/go-testing-interface"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hashicorp/consul/agent/connect"
+	"github.com/hashicorp/consul/agent/consul/discoverychain"
 	"github.com/hashicorp/consul/agent/proxycfg"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/agent/xds/proxysupport"
+	"github.com/hashicorp/consul/lib/stringslice"
 	"github.com/hashicorp/consul/sdk/testutil"
 )
 
@@ -67,6 +70,15 @@ func TestClustersFromSnapshot(t *testing.T) {
 					customAppClusterJSON(t, customClusterJSONOptions{
 						Name: "myservice",
 					})
+				snap.ConnectProxy.UpstreamConfig = map[string]*structs.Upstream{
+					"db": {
+						Config: map[string]interface{}{
+							"envoy_cluster_json": customAppClusterJSON(t, customClusterJSONOptions{
+								Name: "myservice",
+							}),
+						},
+					},
+				}
 			},
 		},
 		{
@@ -216,6 +228,17 @@ func TestClustersFromSnapshot(t *testing.T) {
 		{
 			name:   "expose-paths-local-app-paths",
 			create: proxycfg.TestConfigSnapshotExposeConfig,
+		},
+		{
+			name:   "downstream-service-with-unix-sockets",
+			create: proxycfg.TestConfigSnapshot,
+			setup: func(snap *proxycfg.ConfigSnapshot) {
+				snap.Address = ""
+				snap.Port = 0
+				snap.Proxy.LocalServiceAddress = ""
+				snap.Proxy.LocalServicePort = 0
+				snap.Proxy.LocalServiceSocketPath = "/tmp/downstream_proxy.sock"
+			},
 		},
 		{
 			name:   "expose-paths-new-cluster-http2",
@@ -616,9 +639,78 @@ func TestClustersFromSnapshot(t *testing.T) {
 			create: proxycfg.TestConfigSnapshotIngress_MultipleListenersDuplicateService,
 			setup:  nil,
 		},
+		{
+			name:   "transparent-proxy",
+			create: proxycfg.TestConfigSnapshot,
+			setup: func(snap *proxycfg.ConfigSnapshot) {
+				snap.Proxy.Mode = structs.ProxyModeTransparent
+				snap.ConnectProxy.MeshConfigSet = true
+			},
+		},
+		{
+			name:   "transparent-proxy-catalog-destinations-only",
+			create: proxycfg.TestConfigSnapshot,
+			setup: func(snap *proxycfg.ConfigSnapshot) {
+				snap.Proxy.Mode = structs.ProxyModeTransparent
+
+				snap.ConnectProxy.MeshConfigSet = true
+				snap.ConnectProxy.MeshConfig = &structs.MeshConfigEntry{
+					TransparentProxy: structs.TransparentProxyMeshConfig{
+						MeshDestinationsOnly: true,
+					},
+				}
+			},
+		},
+		{
+			name:   "transparent-proxy-dial-instances-directly",
+			create: proxycfg.TestConfigSnapshot,
+			setup: func(snap *proxycfg.ConfigSnapshot) {
+				snap.Proxy.Mode = structs.ProxyModeTransparent
+
+				// We add a passthrough cluster for each upstream service name
+				snap.ConnectProxy.PassthroughUpstreams = map[string]proxycfg.ServicePassthroughAddrs{
+					"default/kafka": {
+						SNI: "kafka.default.dc1.internal.e5b08d03-bfc3-c870-1833-baddb116e648.consul",
+						Addrs: map[string]struct{}{
+							"9.9.9.9": {},
+						},
+					},
+					"default/mongo": {
+						SNI: "mongo.default.dc1.internal.e5b08d03-bfc3-c870-1833-baddb116e648.consul",
+						Addrs: map[string]struct{}{
+							"10.10.10.10": {},
+							"10.10.10.12": {},
+						},
+					},
+				}
+
+				// There should still be a cluster for non-passthrough requests
+				snap.ConnectProxy.DiscoveryChain["mongo"] = discoverychain.TestCompileConfigEntries(
+					t, "mongo", "default", "dc1",
+					connect.TestClusterID+".consul", "dc1", nil)
+				snap.ConnectProxy.WatchedUpstreamEndpoints["mongo"] = map[string]structs.CheckServiceNodes{
+					"mongo.default.dc1": {
+						structs.CheckServiceNode{
+							Node: &structs.Node{
+								Datacenter: "dc1",
+							},
+							Service: &structs.NodeService{
+								Service: "mongo",
+								Address: "7.7.7.7",
+								Port:    27017,
+								TaggedAddresses: map[string]structs.ServiceAddress{
+									"virtual": {Address: "6.6.6.6"},
+								},
+							},
+						},
+					},
+				}
+			},
+		},
 	}
 
 	latestEnvoyVersion := proxysupport.EnvoyVersions[0]
+	latestEnvoyVersion_v2 := proxysupport.EnvoyVersionsV2[0]
 	for _, envoyVersion := range proxysupport.EnvoyVersions {
 		sf, err := determineSupportedProxyFeaturesFromString(envoyVersion)
 		require.NoError(t, err)
@@ -638,13 +730,10 @@ func TestClustersFromSnapshot(t *testing.T) {
 					}
 
 					// Need server just for logger dependency
-					s := Server{Logger: testutil.Logger(t)}
+					g := newResourceGenerator(testutil.Logger(t), nil, nil, false)
+					g.ProxyFeatures = sf
 
-					cInfo := connectionInfo{
-						Token:         "my-token",
-						ProxyFeatures: sf,
-					}
-					clusters, err := s.clustersFromSnapshot(cInfo, snap)
+					clusters, err := g.clustersFromSnapshot(snap)
 					require.NoError(t, err)
 
 					sort.Slice(clusters, func(i, j int) bool {
@@ -666,6 +755,9 @@ func TestClustersFromSnapshot(t *testing.T) {
 					})
 
 					t.Run("v2-compat", func(t *testing.T) {
+						if !stringslice.Contains(proxysupport.EnvoyVersionsV2, envoyVersion) {
+							t.Skip()
+						}
 						respV2, err := convertDiscoveryResponseToV2(r)
 						require.NoError(t, err)
 
@@ -678,123 +770,12 @@ func TestClustersFromSnapshot(t *testing.T) {
 
 						gName += ".v2compat"
 
-						require.JSONEq(t, goldenEnvoy(t, filepath.Join("clusters", gName), envoyVersion, latestEnvoyVersion, gotJSON), gotJSON)
+						require.JSONEq(t, goldenEnvoy(t, filepath.Join("clusters", gName), envoyVersion, latestEnvoyVersion_v2, gotJSON), gotJSON)
 					})
 				})
 			}
 		})
 	}
-}
-
-func expectClustersJSONResources(snap *proxycfg.ConfigSnapshot) map[string]string {
-	return map[string]string{
-		"local_app": `
-			{
-				"@type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
-				"name": "local_app",
-				"type": "STATIC",
-				"connectTimeout": "5s",
-				"loadAssignment": {
-					"clusterName": "local_app",
-					"endpoints": [
-						{
-							"lbEndpoints": [
-								{
-									"endpoint": {
-										"address": {
-											"socketAddress": {
-												"address": "127.0.0.1",
-												"portValue": 8080
-											}
-										}
-									}
-								}
-							]
-						}
-					]
-				}
-			}`,
-		"db": `
-			{
-				"@type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
-				"name": "db.default.dc1.internal.11111111-2222-3333-4444-555555555555.consul",
-				"type": "EDS",
-				"edsClusterConfig": {
-					"edsConfig": {
-						"resourceApiVersion": "V3",
-						"ads": {
-
-						}
-					}
-				},
-				"outlierDetection": {
-
-				},
-				"circuitBreakers": {
-
-				},
-				"altStatName": "db.default.dc1.internal.11111111-2222-3333-4444-555555555555.consul",
-				"commonLbConfig": {
-					"healthyPanicThreshold": {}
-				},
-				"connectTimeout": "5s",
-				"transportSocket": ` + expectedUpstreamTransportSocketJSON(snap, "db.default.dc1.internal.11111111-2222-3333-4444-555555555555.consul") + `
-			}`,
-		"prepared_query:geo-cache": `
-			{
-				"@type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
-				"name": "geo-cache.default.dc1.query.11111111-2222-3333-4444-555555555555.consul",
-				"type": "EDS",
-				"edsClusterConfig": {
-					"edsConfig": {
-						"resourceApiVersion": "V3",
-						"ads": {
-
-						}
-					}
-				},
-				"outlierDetection": {
-
-				},
-				"circuitBreakers": {
-
-				},
-				"connectTimeout": "5s",
-				"transportSocket": ` + expectedUpstreamTransportSocketJSON(snap, "geo-cache.default.dc1.query.11111111-2222-3333-4444-555555555555.consul") + `
-			}`,
-	}
-}
-
-func expectClustersJSONFromResources(snap *proxycfg.ConfigSnapshot, v, n uint64, resourcesJSON map[string]string) string {
-	resJSON := ""
-
-	// Sort resources into specific order because that matters in JSONEq
-	// comparison later.
-	keyOrder := []string{"local_app"}
-	for _, u := range snap.Proxy.Upstreams {
-		keyOrder = append(keyOrder, u.Identifier())
-	}
-	for _, k := range keyOrder {
-		j, ok := resourcesJSON[k]
-		if !ok {
-			continue
-		}
-		if resJSON != "" {
-			resJSON += ",\n"
-		}
-		resJSON += j
-	}
-
-	return `{
-		"versionInfo": "` + hexString(v) + `",
-		"resources": [` + resJSON + `],
-		"typeUrl": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
-		"nonce": "` + hexString(n) + `"
-		}`
-}
-
-func expectClustersJSON(snap *proxycfg.ConfigSnapshot, v, n uint64) string {
-	return expectClustersJSONFromResources(snap, v, n, expectClustersJSONResources(snap))
 }
 
 type customClusterJSONOptions struct {

@@ -4,7 +4,6 @@ package state
 
 import (
 	"fmt"
-	"strings"
 
 	memdb "github.com/hashicorp/go-memdb"
 
@@ -12,62 +11,6 @@ import (
 )
 
 func withEnterpriseSchema(_ *memdb.DBSchema) {}
-
-func indexNodeServiceFromHealthCheck(raw interface{}) ([]byte, error) {
-	hc, ok := raw.(*structs.HealthCheck)
-	if !ok {
-		return nil, fmt.Errorf("unexpected type %T for structs.HealthCheck index", raw)
-	}
-
-	if hc.Node == "" {
-		return nil, errMissingValueForIndex
-	}
-
-	var b indexBuilder
-	b.String(strings.ToLower(hc.Node))
-	b.String(strings.ToLower(hc.ServiceID))
-	return b.Bytes(), nil
-}
-
-func indexFromNodeServiceQuery(arg interface{}) ([]byte, error) {
-	hc, ok := arg.(NodeServiceQuery)
-	if !ok {
-		return nil, fmt.Errorf("unexpected type %T for NodeServiceQuery index", arg)
-	}
-
-	var b indexBuilder
-	b.String(strings.ToLower(hc.Node))
-	b.String(strings.ToLower(hc.Service))
-	return b.Bytes(), nil
-}
-
-func indexFromNode(raw interface{}) ([]byte, error) {
-	n, ok := raw.(*structs.Node)
-	if !ok {
-		return nil, fmt.Errorf("unexpected type %T for structs.Node index", raw)
-	}
-
-	if n.Node == "" {
-		return nil, errMissingValueForIndex
-	}
-
-	var b indexBuilder
-	b.String(strings.ToLower(n.Node))
-	return b.Bytes(), nil
-}
-
-// indexFromNodeQuery builds an index key where Query.Value is lowercase, and is
-// a required value.
-func indexFromNodeQuery(arg interface{}) ([]byte, error) {
-	q, ok := arg.(Query)
-	if !ok {
-		return nil, fmt.Errorf("unexpected type %T for Query index", arg)
-	}
-
-	var b indexBuilder
-	b.String(strings.ToLower(q.Value))
-	return b.Bytes(), nil
-}
 
 func serviceIndexName(name string, _ *structs.EnterpriseMeta) string {
 	return fmt.Sprintf("service.%s", name)
@@ -85,7 +28,7 @@ func serviceKindIndexName(kind structs.ServiceKind, _ *structs.EnterpriseMeta) s
 
 func catalogUpdateServicesIndexes(tx WriteTxn, idx uint64, _ *structs.EnterpriseMeta) error {
 	// overall services index
-	if err := indexUpdateMaxTxn(tx, idx, "services"); err != nil {
+	if err := indexUpdateMaxTxn(tx, idx, tableServices); err != nil {
 		return fmt.Errorf("failed updating index: %s", err)
 	}
 
@@ -119,7 +62,7 @@ func catalogUpdateServiceExtinctionIndex(tx WriteTxn, idx uint64, _ *structs.Ent
 
 func catalogInsertService(tx WriteTxn, svc *structs.ServiceNode) error {
 	// Insert the service and update the index
-	if err := tx.Insert("services", svc); err != nil {
+	if err := tx.Insert(tableServices, svc); err != nil {
 		return fmt.Errorf("failed inserting service: %s", err)
 	}
 
@@ -139,7 +82,7 @@ func catalogInsertService(tx WriteTxn, svc *structs.ServiceNode) error {
 }
 
 func catalogServicesMaxIndex(tx ReadTxn, _ *structs.EnterpriseMeta) uint64 {
-	return maxIndexTxn(tx, "services")
+	return maxIndexTxn(tx, tableServices)
 }
 
 func catalogServiceMaxIndex(tx ReadTxn, serviceName string, _ *structs.EnterpriseMeta) (<-chan struct{}, interface{}, error) {
@@ -150,20 +93,12 @@ func catalogServiceKindMaxIndex(tx ReadTxn, ws memdb.WatchSet, kind structs.Serv
 	return maxIndexWatchTxn(tx, ws, serviceKindIndexName(kind, nil))
 }
 
-func catalogServiceList(tx ReadTxn, _ *structs.EnterpriseMeta, _ bool) (memdb.ResultIterator, error) {
-	return tx.Get("services", "id")
-}
-
-func catalogServiceListByKind(tx ReadTxn, kind structs.ServiceKind, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
-	return tx.Get("services", "kind", string(kind))
+func catalogServiceListNoWildcard(tx ReadTxn, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
+	return tx.Get(tableServices, indexID)
 }
 
 func catalogServiceListByNode(tx ReadTxn, node string, _ *structs.EnterpriseMeta, _ bool) (memdb.ResultIterator, error) {
-	return tx.Get("services", "node", node)
-}
-
-func catalogServiceNodeList(tx ReadTxn, name string, index string, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
-	return tx.Get("services", index, name)
+	return tx.Get(tableServices, indexNode, Query{Value: node})
 }
 
 func catalogServiceLastExtinctionIndex(tx ReadTxn, _ *structs.EnterpriseMeta) (interface{}, error) {
@@ -172,50 +107,37 @@ func catalogServiceLastExtinctionIndex(tx ReadTxn, _ *structs.EnterpriseMeta) (i
 
 func catalogMaxIndex(tx ReadTxn, _ *structs.EnterpriseMeta, checks bool) uint64 {
 	if checks {
-		return maxIndexTxn(tx, "nodes", "services", "checks")
+		return maxIndexTxn(tx, "nodes", tableServices, tableChecks)
 	}
-	return maxIndexTxn(tx, "nodes", "services")
+	return maxIndexTxn(tx, "nodes", tableServices)
 }
 
 func catalogMaxIndexWatch(tx ReadTxn, ws memdb.WatchSet, _ *structs.EnterpriseMeta, checks bool) uint64 {
 	if checks {
-		return maxIndexWatchTxn(tx, ws, "nodes", "services", "checks")
+		return maxIndexWatchTxn(tx, ws, "nodes", tableServices, tableChecks)
 	}
-	return maxIndexWatchTxn(tx, ws, "nodes", "services")
+	return maxIndexWatchTxn(tx, ws, "nodes", tableServices)
 }
 
 func catalogUpdateCheckIndexes(tx WriteTxn, idx uint64, _ *structs.EnterpriseMeta) error {
 	// update the universal index entry
-	if err := tx.Insert(tableIndex, &IndexEntry{"checks", idx}); err != nil {
+	if err := tx.Insert(tableIndex, &IndexEntry{tableChecks, idx}); err != nil {
 		return fmt.Errorf("failed updating index: %s", err)
 	}
 	return nil
 }
 
 func catalogChecksMaxIndex(tx ReadTxn, _ *structs.EnterpriseMeta) uint64 {
-	return maxIndexTxn(tx, "checks")
+	return maxIndexTxn(tx, tableChecks)
 }
 
-func catalogListChecksByNode(tx ReadTxn, node string, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
-	return tx.Get("checks", "node", node)
-}
-
-func catalogListChecksByService(tx ReadTxn, service string, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
-	return tx.Get("checks", "service", service)
-}
-
-func catalogListChecksInState(tx ReadTxn, state string, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
-	// simpler than normal due to the use of the CompoundMultiIndex
-	return tx.Get("checks", "status", state)
-}
-
-func catalogListChecks(tx ReadTxn, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
-	return tx.Get("checks", "id")
+func catalogListChecksByNode(tx ReadTxn, q Query) (memdb.ResultIterator, error) {
+	return tx.Get(tableChecks, indexNode, q)
 }
 
 func catalogInsertCheck(tx WriteTxn, chk *structs.HealthCheck, idx uint64) error {
 	// Insert the check
-	if err := tx.Insert("checks", chk); err != nil {
+	if err := tx.Insert(tableChecks, chk); err != nil {
 		return fmt.Errorf("failed inserting check: %s", err)
 	}
 

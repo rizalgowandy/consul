@@ -1,7 +1,6 @@
 ---
 layout: docs
 page_title: Configuration
-sidebar_title: Configuration
 description: >-
   The agent has various configuration options that can be specified via the
   command-line or via configuration files. All of the configuration options are
@@ -308,8 +307,11 @@ The options below are all specified on the command-line.
   specify multiple agents to join. The value can contain IPv4, IPv6, or DNS
   addresses. In Consul 1.1.0 and later this can be set to a
   [go-sockaddr](https://godoc.org/github.com/hashicorp/go-sockaddr/template)
-  template. If Consul is running on the non-default Serf LAN port, this must be
-  specified as well. IPv6 must use the "bracketed" syntax. If multiple values
+  template. If Consul is running on the non-default Serf LAN port, the port must
+  be specified in the join address, or configured as the agent's default Serf port
+  using the [`ports.serf_lan`](#serf_lan_port) configuration option or
+  [`-serf-lan-port`](#_serf_lan_port) command line flag.
+  IPv6 must use the "bracketed" syntax. If multiple values
   are given, they are tried and retried in the order listed until the first
   succeeds. Here are some examples:
 
@@ -321,6 +323,11 @@ The options below are all specified on the command-line.
   ```shell
   # Using IPv4
   $ consul agent -retry-join "10.0.4.67"
+  ```
+
+  ```shell
+  # Using a non-default Serf LAN port
+  $ consul agent -retry-join "192.0.2.10:8304"
   ```
 
   ```shell
@@ -851,20 +858,20 @@ Valid time units are 'ns', 'us' (or 'µs'), 'ms', 's', 'm', 'h'."
 - `serf_wan_allowed_cidrs` ((#serf_wan_allowed_cidrs)) Equivalent to the [`-serf-wan-allowed-cidrs` command-line flag](#_serf_wan_allowed_cidrs).
 
 - `audit` <EnterpriseAlert inline /> - Added in Consul 1.8, the audit object allow users to enable auditing
-  and configure a sink and filters for their audit logs.
+  and configure a sink and filters for their audit logs. For more information, review the [audit log tutorial](https://learn.hashicorp.com/tutorials/consul/audit-logging).
 
   ```hcl
-    audit {
-      enabled = true
-      sink "My sink" {
-        type   = "file"
-        format = "json"
-        path   = "data/audit/audit.json"
-        delivery_guarantee = "best-effort"
-        rotate_duration = "24h"
-        rotate_max_files = 15
-        rotate_bytes = 25165824
-      }
+  audit {
+    enabled = true
+    sink "My sink" {
+      type   = "file"
+      format = "json"
+      path   = "data/audit/audit.json"
+      delivery_guarantee = "best-effort"
+      rotate_duration = "24h"
+      rotate_max_files = 15
+      rotate_bytes = 25165824
+    }
   }
   ```
 
@@ -1637,6 +1644,8 @@ bind_addr = "{{ GetPrivateInterfaces | include \"network\" \"10.0.0.0/8\" | attr
 
 - `leave_on_terminate` If enabled, when the agent receives a TERM signal, it will send a `Leave` message to the rest of the cluster and gracefully leave. The default behavior for this feature varies based on whether or not the agent is running as a client or a server (prior to Consul 0.7 the default value was unconditionally set to `false`). On agents in client-mode, this defaults to `true` and for agents in server-mode, this defaults to `false`.
 
+- `license_path` <EnterpriseAlert inline /> This specifies the path to a file that contains the Consul Enterprise license. Alternatively the license may also be specified in either the `CONSUL_LICENSE` or `CONSUL_LICENSE_PATH` environment variables. See the [licensing documentation](/docs/enterprise/license/overview) for more information about Consul Enterprise license management. Added in versions 1.10.0, 1.9.7 and 1.8.13. Prior to version 1.10.0 the value may be set for all agents to faciliate forwards compatibility with 1.10 but will only actually be used by client agents.
+
 - `limits` Available in Consul 0.9.3 and later, this is a nested
   object that configures limits that are enforced by the agent. Prior to Consul 1.5.2,
   this only applied to agents in client mode, not Consul servers. The following parameters
@@ -1718,8 +1727,9 @@ bind_addr = "{{ GetPrivateInterfaces | include \"network\" \"10.0.0.0/8\" | attr
     in `-dev` mode. Currently gRPC is only used to expose Envoy xDS API to Envoy
     proxies.
   - `serf_lan` ((#serf_lan_port)) - The Serf LAN port. Default 8301. TCP
-    and UDP.
-  - `serf_wan` ((#serf_wan_port)) - The Serf WAN port. Default 8302. Set
+    and UDP. Equivalent to the [`-serf-lan-port` command line flag](#_serf_lan_port).
+  - `serf_wan` ((#serf_wan_port)) - The Serf WAN port. Default 8302.
+    Equivalent to the [`-serf-wan-port` command line flag](#_serf_wan_port). Set
     to -1 to disable. **Note**: this will disable WAN federation which is not recommended.
     Various catalog and WAN related endpoints will return errors or empty results.
     TCP and UDP.
@@ -1763,29 +1773,50 @@ bind_addr = "{{ GetPrivateInterfaces | include \"network\" \"10.0.0.0/8\" | attr
 - `raft_protocol` ((#raft_protocol)) Equivalent to the [`-raft-protocol`
   command-line flag](#_raft_protocol).
 
-- `raft_snapshot_threshold` ((#\_raft_snapshot_threshold)) This controls
-  the minimum number of raft commit entries between snapshots that are saved to disk.
-  This is a low-level parameter that should rarely need to be changed. Very busy
-  clusters experiencing excessive disk IO may increase this value to reduce disk
-  IO, and minimize the chances of all servers taking snapshots at the same time.
+- `raft_snapshot_threshold` ((#\_raft_snapshot_threshold)) This controls the
+  minimum number of raft commit entries between snapshots that are saved to
+  disk. This is a low-level parameter that should rarely need to be changed.
+  Very busy clusters experiencing excessive disk IO may increase this value to
+  reduce disk IO, and minimize the chances of all servers taking snapshots at
+  the same time. Increasing this trades off disk IO for disk space since the log
+  will grow much larger and the space in the raft.db file can't be reclaimed
+  till the next snapshot. Servers may take longer to recover from crashes or
+  failover if this is increased significantly as more logs will need to be
+  replayed. In Consul 1.1.0 and later this defaults to 16384, and in prior
+  versions it was set to 8192.
+  
+  Since Consul 1.10.0 this can be reloaded using `consul reload` or sending the
+  server a `SIGHUP` to allow tuning snapshot activity without a rolling restart
+  in emergencies.
+
+- `raft_snapshot_interval` ((#\_raft_snapshot_interval)) This controls how often
+  servers check if they need to save a snapshot to disk. This is a low-level
+  parameter that should rarely need to be changed. Very busy clusters
+  experiencing excessive disk IO may increase this value to reduce disk IO, and
+  minimize the chances of all servers taking snapshots at the same time.
   Increasing this trades off disk IO for disk space since the log will grow much
-  larger and the space in the raft.db file can't be reclaimed till the next snapshot.
-  Servers may take longer to recover from crashes or failover if this is increased
-  significantly as more logs will need to be replayed. In Consul 1.1.0 and later
-  this defaults to 16384, and in prior versions it was set to 8192.
+  larger and the space in the raft.db file can't be reclaimed till the next
+  snapshot. Servers may take longer to recover from crashes or failover if this
+  is increased significantly as more logs will need to be replayed. In Consul
+  1.1.0 and later this defaults to `30s`, and in prior versions it was set to
+  `5s`.
+  
+  Since Consul 1.10.0 this can be reloaded using `consul reload` or sending the
+  server a `SIGHUP` to allow tuning snapshot activity without a rolling restart
+  in emergencies.
 
-- `raft_snapshot_interval` ((#\_raft_snapshot_interval)) This controls how often servers check if they
-  need to save a snapshot to disk. This is a low-level parameter that should rarely need to be changed. Very busy clusters experiencing excessive disk IO may increase this value to reduce disk IO, and minimize the chances of all servers taking snapshots at the same time. Increasing this trades
-  off disk IO for disk space since the log will grow much larger and the space in the raft.db file can't be reclaimed till the next snapshot. Servers may take longer to recover from crashes or failover if this is increased significantly as more logs will need to be replayed. In Consul 1.1.0 and later this defaults to `30s`, and in prior versions it was set to `5s`.
-
-- `raft_trailing_logs` - This controls how many
-  log entries are left in the log store on disk after a snapshot is made. This should
-  only be adjusted when followers cannot catch up to the leader due to a very large
-  snapshot size that and high write throughput causing log truncation before an snapshot
-  can be fully installed. If you need to use this to recover a cluster, consider
-  reducing write throughput or the amount of data stored on Consul as it is likely
-  under a load it is not designed to handle. The default value is 10000 which is
-  suitable for all normal workloads. Added in Consul 1.5.3.
+- `raft_trailing_logs` - This controls how many log entries are left in the log
+  store on disk after a snapshot is made. This should only be adjusted when
+  followers cannot catch up to the leader due to a very large snapshot size
+  and high write throughput causing log truncation before an snapshot can be
+  fully installed on a follower. If you need to use this to recover a cluster,
+  consider reducing write throughput or the amount of data stored on Consul as
+  it is likely under a load it is not designed to handle. The default value is
+  10000 which is suitable for all normal workloads. Added in Consul 1.5.3.
+  
+  Since Consul 1.10.0 this can be reloaded using `consul reload` or sending the
+  server a `SIGHUP` to allow recovery without downtime when followers can't keep
+  up. 
 
 - `reap` This controls Consul's automatic reaping of child processes,
   which is useful if Consul is running as PID 1 in a Docker container. If this isn't
@@ -2209,14 +2240,10 @@ bind_addr = "{{ GetPrivateInterfaces | include \"network\" \"10.0.0.0/8\" | attr
     currently only supports numeric IDs.
   - `mode` - The permission bits to set on the file.
 
-- `use_streaming_backend` (experimental) when enabled Consul client agents will use
+- `use_streaming_backend` defaults to true. When enabled Consul client agents will use
   streaming rpc, instead of the traditional blocking queries, for endpoints which support
   streaming. All servers must have [`rpc.enable_streaming`](#rpc_enable_streaming)
   enabled before any client can enable `use_streaming_backend`.
-  At least one of [`dns_config.use_cache`](#dns_use_cache) or
-  [`http_config.use_cache`](#http_config_use_cache) must be enabled, otherwise
-  this setting has no effect.
-  `use_streaming_backend` will default to true in a future version of Consul.
 
 - `verify_incoming` - If set to true, Consul
   requires that all incoming connections make use of TLS and that the client
@@ -2297,6 +2324,13 @@ items which are reloaded include:
 - Log level
 - [Metric Prefix Filter](#telemetry-prefix_filter)
 - [Node Metadata](#node_meta)
+- Some Raft options (since Consul 1.10.0)
+  - [`raft_snapshot_threshold`](#_raft_snapshot_threshold)
+  - [`raft_snapshot_interval`](#_raft_snapshot_interval)
+  - [`raft_trailing_logs`](#_raft_trailing_logs)
+  - These can be important in certain outage situations so being able to control
+    them without a restart provides a recovery path that doesn't involve
+    downtime. They generally shouldn't be changed otherwise.
 - [RPC rate limiting](#limits)
 - [HTTP Maximum Connections per Client](#http_max_conns_per_client)
 - Services

@@ -1,7 +1,6 @@
 ---
 layout: docs
 page_title: Uninstall
-sidebar_title: Uninstall
 description: Uninstall Consul on Kubernetes
 ---
 
@@ -16,8 +15,6 @@ up some resources that Helm does not delete.
    $ helm delete hashicorp
    release "hashicorp" uninstalled
    ```
-
-   -> If using Helm 2, run `helm delete --purge hashicorp`
 
 1. After deleting the Helm release, you need to delete the `PersistentVolumeClaim`'s
    for the persistent volumes that store Consul's data. These are not deleted by Helm due to a [bug](https://github.com/helm/helm/issues/5156).

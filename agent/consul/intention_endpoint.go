@@ -7,14 +7,14 @@ import (
 
 	"github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
-	"github.com/hashicorp/consul/acl"
-	"github.com/hashicorp/consul/agent/connect"
-	"github.com/hashicorp/consul/agent/consul/state"
-	"github.com/hashicorp/consul/agent/structs"
-	"github.com/hashicorp/consul/lib"
 	"github.com/hashicorp/go-bexpr"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-memdb"
+
+	"github.com/hashicorp/consul/acl"
+	"github.com/hashicorp/consul/agent/consul/state"
+	"github.com/hashicorp/consul/agent/structs"
+	"github.com/hashicorp/consul/lib"
 )
 
 var IntentionSummaries = []prometheus.SummaryDefinition{
@@ -80,7 +80,7 @@ func (s *Intention) Apply(args *structs.IntentionRequest, reply *string) error {
 	// datacenter. These will then be replicated to all the other datacenters.
 	args.Datacenter = s.srv.config.PrimaryDatacenter
 
-	if done, err := s.srv.ForwardRPC("Intention.Apply", args, args, reply); done {
+	if done, err := s.srv.ForwardRPC("Intention.Apply", args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"consul", "intention", "apply"}, time.Now())
@@ -158,15 +158,8 @@ func (s *Intention) Apply(args *structs.IntentionRequest, reply *string) error {
 	args.Mutation = mut
 	args.Intention = nil
 
-	resp, err := s.srv.raftApply(structs.IntentionRequestType, args)
-	if err != nil {
-		return err
-	}
-	if respErr, ok := resp.(error); ok {
-		return respErr
-	}
-
-	return nil
+	_, err = s.srv.raftApply(structs.IntentionRequestType, args)
+	return err
 }
 
 func (s *Intention) computeApplyChangesLegacyCreate(
@@ -430,7 +423,7 @@ func (s *Intention) Get(args *structs.IntentionQueryRequest, reply *structs.Inde
 	}
 
 	// Forward if necessary
-	if done, err := s.srv.ForwardRPC("Intention.Get", args, args, reply); done {
+	if done, err := s.srv.ForwardRPC("Intention.Get", args, reply); done {
 		return err
 	}
 
@@ -508,7 +501,7 @@ func (s *Intention) List(args *structs.IntentionListRequest, reply *structs.Inde
 	}
 
 	// Forward if necessary
-	if done, err := s.srv.ForwardRPC("Intention.List", args, args, reply); done {
+	if done, err := s.srv.ForwardRPC("Intention.List", args, reply); done {
 		return err
 	}
 
@@ -578,7 +571,7 @@ func (s *Intention) Match(args *structs.IntentionQueryRequest, reply *structs.In
 	}
 
 	// Forward if necessary
-	if done, err := s.srv.ForwardRPC("Intention.Match", args, args, reply); done {
+	if done, err := s.srv.ForwardRPC("Intention.Match", args, reply); done {
 		return err
 	}
 
@@ -652,7 +645,7 @@ func (s *Intention) Check(args *structs.IntentionQueryRequest, reply *structs.In
 	}
 
 	// Forward maybe
-	if done, err := s.srv.ForwardRPC("Intention.Check", args, args, reply); done {
+	if done, err := s.srv.ForwardRPC("Intention.Check", args, reply); done {
 		return err
 	}
 
@@ -684,16 +677,7 @@ func (s *Intention) Check(args *structs.IntentionQueryRequest, reply *structs.In
 		return fmt.Errorf("Invalid destination namespace %q: %v", query.DestinationNS, err)
 	}
 
-	// Build the URI
-	var uri connect.CertURI
-	switch query.SourceType {
-	case structs.IntentionSourceConsul:
-		uri = &connect.SpiffeIDService{
-			Namespace: query.SourceNS,
-			Service:   query.SourceName,
-		}
-
-	default:
+	if query.SourceType != structs.IntentionSourceConsul {
 		return fmt.Errorf("unsupported SourceType: %q", query.SourceType)
 	}
 
@@ -732,7 +716,17 @@ func (s *Intention) Check(args *structs.IntentionQueryRequest, reply *structs.In
 	}
 
 	state := s.srv.fsm.State()
-	decision, err := state.IntentionDecision(uri, query.DestinationName, query.DestinationNS, defaultDecision)
+
+	entry := structs.IntentionMatchEntry{
+		Namespace: query.SourceNS,
+		Name:      query.SourceName,
+	}
+	_, intentions, err := state.IntentionMatchOne(nil, entry, structs.IntentionMatchSource)
+	if err != nil {
+		return fmt.Errorf("failed to query intentions for %s/%s", query.SourceNS, query.SourceName)
+	}
+
+	decision, err := state.IntentionDecision(query.DestinationName, query.DestinationNS, intentions, structs.IntentionMatchDestination, defaultDecision, false)
 	if err != nil {
 		return fmt.Errorf("failed to get intention decision from (%s/%s) to (%s/%s): %v",
 			query.SourceNS, query.SourceName, query.DestinationNS, query.DestinationName, err)

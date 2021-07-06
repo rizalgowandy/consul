@@ -6044,7 +6044,7 @@ func TestDNS_AddressLookup(t *testing.T) {
 	}
 	for question, answer := range cases {
 		m := new(dns.Msg)
-		m.SetQuestion(question, dns.TypeSRV)
+		m.SetQuestion(question, dns.TypeA)
 
 		c := new(dns.Client)
 		in, _, err := c.Exchange(m, a.DNSAddr())
@@ -6052,20 +6052,73 @@ func TestDNS_AddressLookup(t *testing.T) {
 			t.Fatalf("err: %v", err)
 		}
 
-		if len(in.Answer) != 1 {
-			t.Fatalf("Bad: %#v", in)
-		}
+		require.Len(t, in.Answer, 1)
 
+		require.Equal(t, dns.TypeA, in.Answer[0].Header().Rrtype)
 		aRec, ok := in.Answer[0].(*dns.A)
-		if !ok {
-			t.Fatalf("Bad: %#v", in.Answer[0])
-		}
-		if aRec.A.To4().String() != answer {
-			t.Fatalf("Bad: %#v", aRec)
-		}
-		if aRec.Hdr.Ttl != 0 {
-			t.Fatalf("Bad: %#v", in.Answer[0])
-		}
+		require.True(t, ok)
+		require.Equal(t, aRec.A.To4().String(), answer)
+		require.Zero(t, aRec.Hdr.Ttl)
+	}
+}
+
+func TestDNS_AddressLookupANY(t *testing.T) {
+	if testing.Short() {
+		t.Skip("too slow for testing.Short")
+	}
+
+	t.Parallel()
+	a := NewTestAgent(t, "")
+	defer a.Shutdown()
+	testrpc.WaitForLeader(t, a.RPC, "dc1")
+
+	// Look up the addresses
+	cases := map[string]string{
+		"7f000001.addr.dc1.consul.": "127.0.0.1",
+	}
+	for question, answer := range cases {
+		m := new(dns.Msg)
+		m.SetQuestion(question, dns.TypeANY)
+
+		c := new(dns.Client)
+		in, _, err := c.Exchange(m, a.DNSAddr())
+
+		require.NoError(t, err)
+		require.Len(t, in.Answer, 1)
+		require.Equal(t, in.Answer[0].Header().Rrtype, dns.TypeA)
+		aRec, ok := in.Answer[0].(*dns.A)
+		require.True(t, ok)
+		require.Equal(t, aRec.A.To4().String(), answer)
+		require.Zero(t, aRec.Hdr.Ttl)
+
+	}
+}
+
+func TestDNS_AddressLookupInvalidType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("too slow for testing.Short")
+	}
+
+	t.Parallel()
+	a := NewTestAgent(t, "")
+	defer a.Shutdown()
+	testrpc.WaitForLeader(t, a.RPC, "dc1")
+
+	// Look up the addresses
+	cases := map[string]string{
+		"7f000001.addr.dc1.consul.": "",
+	}
+	for question := range cases {
+		m := new(dns.Msg)
+		m.SetQuestion(question, dns.TypeSRV)
+
+		c := new(dns.Client)
+		in, _, err := c.Exchange(m, a.DNSAddr())
+		require.NoError(t, err)
+		require.Zero(t, in.Rcode)
+		require.Nil(t, in.Answer)
+		require.NotNil(t, in.Extra)
+		require.Len(t, in.Extra, 1)
 	}
 }
 
@@ -6086,7 +6139,7 @@ func TestDNS_AddressLookupIPV6(t *testing.T) {
 	}
 	for question, answer := range cases {
 		m := new(dns.Msg)
-		m.SetQuestion(question, dns.TypeSRV)
+		m.SetQuestion(question, dns.TypeAAAA)
 
 		c := new(dns.Client)
 		in, _, err := c.Exchange(m, a.DNSAddr())
@@ -6098,6 +6151,9 @@ func TestDNS_AddressLookupIPV6(t *testing.T) {
 			t.Fatalf("Bad: %#v", in)
 		}
 
+		if in.Answer[0].Header().Rrtype != dns.TypeAAAA {
+			t.Fatalf("Invalid type: %#v", in.Answer[0])
+		}
 		aaaaRec, ok := in.Answer[0].(*dns.AAAA)
 		if !ok {
 			t.Fatalf("Bad: %#v", in.Answer[0])
@@ -6107,6 +6163,37 @@ func TestDNS_AddressLookupIPV6(t *testing.T) {
 		}
 		if aaaaRec.Hdr.Ttl != 0 {
 			t.Fatalf("Bad: %#v", in.Answer[0])
+		}
+	}
+}
+
+func TestDNS_AddressLookupIPV6InvalidType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("too slow for testing.Short")
+	}
+
+	t.Parallel()
+	a := NewTestAgent(t, "")
+	defer a.Shutdown()
+	testrpc.WaitForLeader(t, a.RPC, "dc1")
+
+	// Look up the addresses
+	cases := map[string]string{
+		"2607002040050808000000000000200e.addr.consul.": "2607:20:4005:808::200e",
+		"2607112040051808ffffffffffff200e.addr.consul.": "2607:1120:4005:1808:ffff:ffff:ffff:200e",
+	}
+	for question := range cases {
+		m := new(dns.Msg)
+		m.SetQuestion(question, dns.TypeSRV)
+
+		c := new(dns.Client)
+		in, _, err := c.Exchange(m, a.DNSAddr())
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+
+		if in.Answer != nil {
+			t.Fatalf("Bad: %#v", in)
 		}
 	}
 }
@@ -6688,7 +6775,7 @@ func TestDNS_trimUDPResponse_NoTrim(t *testing.T) {
 		},
 	}
 
-	cfg := loadRuntimeConfig(t, `data_dir = "a" bind_addr = "127.0.0.1"`)
+	cfg := loadRuntimeConfig(t, `node_name = "test" data_dir = "a" bind_addr = "127.0.0.1" node_name = "dummy"`)
 	if trimmed := trimUDPResponse(req, resp, cfg.DNSUDPAnswerLimit); trimmed {
 		t.Fatalf("Bad %#v", *resp)
 	}
@@ -6722,7 +6809,7 @@ func TestDNS_trimUDPResponse_NoTrim(t *testing.T) {
 
 func TestDNS_trimUDPResponse_TrimLimit(t *testing.T) {
 	t.Parallel()
-	cfg := loadRuntimeConfig(t, `data_dir = "a" bind_addr = "127.0.0.1"`)
+	cfg := loadRuntimeConfig(t, `node_name = "test" data_dir = "a" bind_addr = "127.0.0.1" node_name = "dummy"`)
 
 	req, resp, expected := &dns.Msg{}, &dns.Msg{}, &dns.Msg{}
 	for i := 0; i < cfg.DNSUDPAnswerLimit+1; i++ {
@@ -6770,7 +6857,7 @@ func loadRuntimeConfig(t *testing.T, hcl string) *config.RuntimeConfig {
 
 func TestDNS_trimUDPResponse_TrimSize(t *testing.T) {
 	t.Parallel()
-	cfg := loadRuntimeConfig(t, `data_dir = "a" bind_addr = "127.0.0.1"`)
+	cfg := loadRuntimeConfig(t, `node_name = "test" data_dir = "a" bind_addr = "127.0.0.1" node_name = "dummy"`)
 
 	req, resp := &dns.Msg{}, &dns.Msg{}
 	for i := 0; i < 100; i++ {
@@ -6823,7 +6910,7 @@ func TestDNS_trimUDPResponse_TrimSize(t *testing.T) {
 
 func TestDNS_trimUDPResponse_TrimSizeEDNS(t *testing.T) {
 	t.Parallel()
-	cfg := loadRuntimeConfig(t, `data_dir = "a" bind_addr = "127.0.0.1"`)
+	cfg := loadRuntimeConfig(t, `node_name = "test" data_dir = "a" bind_addr = "127.0.0.1" node_name = "dummy"`)
 
 	req, resp := &dns.Msg{}, &dns.Msg{}
 
@@ -7126,7 +7213,7 @@ func TestDNS_syncExtra(t *testing.T) {
 
 func TestDNS_Compression_trimUDPResponse(t *testing.T) {
 	t.Parallel()
-	cfg := loadRuntimeConfig(t, `data_dir = "a" bind_addr = "127.0.0.1"`)
+	cfg := loadRuntimeConfig(t, `data_dir = "a" bind_addr = "127.0.0.1" node_name = "dummy"`)
 
 	req, m := dns.Msg{}, dns.Msg{}
 	trimUDPResponse(&req, &m, cfg.DNSUDPAnswerLimit)

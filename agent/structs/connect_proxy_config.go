@@ -3,6 +3,7 @@ package structs
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/lib"
@@ -26,13 +27,29 @@ const (
 	// should be direct and not flow through a mesh gateway.
 	MeshGatewayModeNone MeshGatewayMode = "none"
 
-	// MeshGatewayModeLocal represents that the Upstrea Connect connections
-	// should be made to a mesh gateway in the local datacenter. This is
+	// MeshGatewayModeLocal represents that the Upstream Connect connections
+	// should be made to a mesh gateway in the local datacenter.
 	MeshGatewayModeLocal MeshGatewayMode = "local"
 
 	// MeshGatewayModeRemote represents that the Upstream Connect connections
 	// should be made to a mesh gateway in a remote datacenter.
 	MeshGatewayModeRemote MeshGatewayMode = "remote"
+)
+
+const (
+	// TODO (freddy) Should we have a TopologySourceMixed when there is a mix of proxy reg and tproxy?
+	//				 Currently we label as proxy-registration if ANY instance has the explicit upstream definition.
+	// TopologySourceRegistration is used to label upstreams or downstreams from explicit upstream definitions
+	TopologySourceRegistration = "proxy-registration"
+
+	// TopologySourceSpecificIntention is used to label upstreams or downstreams from specific intentions
+	TopologySourceSpecificIntention = "specific-intention"
+
+	// TopologySourceWildcardIntention is used to label upstreams or downstreams from wildcard intentions
+	TopologySourceWildcardIntention = "wildcard-intention"
+
+	// TopologySourceDefaultAllow is used to label upstreams or downstreams from default allow ACL policy
+	TopologySourceDefaultAllow = "default-allow"
 )
 
 // MeshGatewayConfig controls how Mesh Gateways are configured and used
@@ -75,6 +92,61 @@ func (c *MeshGatewayConfig) ToAPI() api.MeshGatewayConfig {
 	return api.MeshGatewayConfig{Mode: api.MeshGatewayMode(c.Mode)}
 }
 
+type ProxyMode string
+
+const (
+	// ProxyModeDefault represents no specific mode and should
+	// be used to indicate that a different layer of the configuration
+	// chain should take precedence
+	ProxyModeDefault ProxyMode = ""
+
+	// ProxyModeTransparent represents that inbound and outbound application
+	// traffic is being captured and redirected through the proxy.
+	ProxyModeTransparent ProxyMode = "transparent"
+
+	// ProxyModeDirect represents that the proxy's listeners must be dialed directly
+	// by the local application and other proxies.
+	ProxyModeDirect ProxyMode = "direct"
+)
+
+func ValidateProxyMode(mode string) (ProxyMode, error) {
+	switch ProxyMode(mode) {
+	case ProxyModeDefault:
+		return ProxyModeDefault, nil
+	case ProxyModeDirect:
+		return ProxyModeDirect, nil
+	case ProxyModeTransparent:
+		return ProxyModeTransparent, nil
+	default:
+		return ProxyModeDefault, fmt.Errorf("Invalid Proxy Mode: %q", mode)
+	}
+}
+
+type TransparentProxyConfig struct {
+	// The port of the listener where outbound application traffic is being redirected to.
+	OutboundListenerPort int `json:",omitempty" alias:"outbound_listener_port"`
+
+	// DialedDirectly indicates whether transparent proxies can dial this proxy instance directly.
+	// The discovery chain is not considered when dialing a service instance directly.
+	// This setting is useful when addressing stateful services, such as a database cluster with a leader node.
+	DialedDirectly bool `json:",omitempty" alias:"dialed_directly"`
+}
+
+func (c TransparentProxyConfig) ToAPI() *api.TransparentProxyConfig {
+	if c.IsZero() {
+		return nil
+	}
+	return &api.TransparentProxyConfig{
+		OutboundListenerPort: c.OutboundListenerPort,
+		DialedDirectly:       c.DialedDirectly,
+	}
+}
+
+func (c *TransparentProxyConfig) IsZero() bool {
+	zeroVal := TransparentProxyConfig{}
+	return *c == zeroVal
+}
+
 // ConnectProxyConfig describes the configuration needed for any proxy managed
 // or unmanaged. It describes a single logical service's listener and optionally
 // upstreams and sidecar-related config for a single instance. To describe a
@@ -105,6 +177,13 @@ type ConnectProxyConfig struct {
 	// (DestinationServiceID is set) but otherwise will be ignored.
 	LocalServicePort int `json:",omitempty" alias:"local_service_port"`
 
+	// LocalServiceSocketPath is the socket of the local service instance. It is optional
+	// and should only be specified for "side-car" style proxies.
+	LocalServiceSocketPath string `json:",omitempty" alias:"local_service_socket_path"`
+
+	// Mode represents how the proxy's inbound and upstream listeners are dialed.
+	Mode ProxyMode
+
 	// Config is the arbitrary configuration data provided with the proxy
 	// registration.
 	Config map[string]interface{} `json:",omitempty" bexpr:"-"`
@@ -118,17 +197,22 @@ type ConnectProxyConfig struct {
 
 	// Expose defines whether checks or paths are exposed through the proxy
 	Expose ExposeConfig `json:",omitempty"`
+
+	// TransparentProxy defines configuration for when the proxy is in
+	// transparent mode.
+	TransparentProxy TransparentProxyConfig `json:",omitempty" alias:"transparent_proxy"`
 }
 
 func (t *ConnectProxyConfig) UnmarshalJSON(data []byte) (err error) {
 	type Alias ConnectProxyConfig
 	aux := &struct {
-		DestinationServiceNameSnake string            `json:"destination_service_name"`
-		DestinationServiceIDSnake   string            `json:"destination_service_id"`
-		LocalServiceAddressSnake    string            `json:"local_service_address"`
-		LocalServicePortSnake       int               `json:"local_service_port"`
-		MeshGatewaySnake            MeshGatewayConfig `json:"mesh_gateway"`
-
+		DestinationServiceNameSnake string                 `json:"destination_service_name"`
+		DestinationServiceIDSnake   string                 `json:"destination_service_id"`
+		LocalServiceAddressSnake    string                 `json:"local_service_address"`
+		LocalServicePortSnake       int                    `json:"local_service_port"`
+		LocalServiceSocketPathSnake string                 `json:"local_service_socket_path"`
+		MeshGatewaySnake            MeshGatewayConfig      `json:"mesh_gateway"`
+		TransparentProxySnake       TransparentProxyConfig `json:"transparent_proxy"`
 		*Alias
 	}{
 		Alias: (*Alias)(t),
@@ -148,8 +232,17 @@ func (t *ConnectProxyConfig) UnmarshalJSON(data []byte) (err error) {
 	if t.LocalServicePort == 0 {
 		t.LocalServicePort = aux.LocalServicePortSnake
 	}
+	if t.LocalServiceSocketPath == "" {
+		t.LocalServiceSocketPath = aux.LocalServiceSocketPathSnake
+	}
 	if t.MeshGateway.Mode == "" {
 		t.MeshGateway.Mode = aux.MeshGatewaySnake.Mode
+	}
+	if t.TransparentProxy.OutboundListenerPort == 0 {
+		t.TransparentProxy.OutboundListenerPort = aux.TransparentProxySnake.OutboundListenerPort
+	}
+	if !t.TransparentProxy.DialedDirectly {
+		t.TransparentProxy.DialedDirectly = aux.TransparentProxySnake.DialedDirectly
 	}
 
 	return nil
@@ -157,16 +250,25 @@ func (t *ConnectProxyConfig) UnmarshalJSON(data []byte) (err error) {
 }
 
 func (c *ConnectProxyConfig) MarshalJSON() ([]byte, error) {
-	type typeCopy ConnectProxyConfig
-	copy := typeCopy(*c)
+	type Alias ConnectProxyConfig
+	out := struct {
+		TransparentProxy *TransparentProxyConfig `json:",omitempty"`
+		Alias
+	}{
+		Alias: (Alias)(*c),
+	}
 
-	proxyConfig, err := lib.MapWalk(copy.Config)
+	proxyConfig, err := lib.MapWalk(c.Config)
 	if err != nil {
 		return nil, err
 	}
-	copy.Config = proxyConfig
+	out.Alias.Config = proxyConfig
 
-	return json.Marshal(&copy)
+	if !c.TransparentProxy.IsZero() {
+		out.TransparentProxy = &out.Alias.TransparentProxy
+	}
+
+	return json.Marshal(&out)
 }
 
 // ToAPI returns the api struct with the same fields. We have duplicates to
@@ -179,6 +281,9 @@ func (c *ConnectProxyConfig) ToAPI() *api.AgentServiceConnectProxyConfig {
 		DestinationServiceID:   c.DestinationServiceID,
 		LocalServiceAddress:    c.LocalServiceAddress,
 		LocalServicePort:       c.LocalServicePort,
+		LocalServiceSocketPath: c.LocalServiceSocketPath,
+		Mode:                   api.ProxyMode(c.Mode),
+		TransparentProxy:       c.TransparentProxy.ToAPI(),
 		Config:                 c.Config,
 		Upstreams:              c.Upstreams.ToAPI(),
 		MeshGateway:            c.MeshGateway.ToAPI(),
@@ -204,6 +309,15 @@ func (us Upstreams) ToAPI() []api.Upstream {
 		a[i] = u.ToAPI()
 	}
 	return a
+}
+
+func (us Upstreams) ToMap() map[string]*Upstream {
+	upstreamMap := make(map[string]*Upstream)
+
+	for i := range us {
+		upstreamMap[us[i].Identifier()] = &us[i]
+	}
+	return upstreamMap
 }
 
 // UpstreamsFromAPI is a helper for converting api.Upstream to Upstream.
@@ -242,7 +356,12 @@ type Upstream struct {
 
 	// LocalBindPort is the ip address a side-car proxy should listen on for traffic
 	// destined for this upstream service. Required.
-	LocalBindPort int `alias:"local_bind_port"`
+	LocalBindPort int `json:",omitempty" alias:"local_bind_port"`
+
+	// These are exclusive with LocalBindAddress/LocalBindPort
+	LocalBindSocketPath string `json:",omitempty" alias:"local_bind_socket_path"`
+	// This might be represented as an int, but because it's octal outputs can be a bit strange.
+	LocalBindSocketMode string `json:",omitempty" alias:"local_bind_socket_mode"`
 
 	// Config is an opaque config that is specific to the proxy process being run.
 	// It can be used to pass arbitrary configuration for this specific upstream
@@ -256,6 +375,10 @@ type Upstream struct {
 	// an ingress gateway. This cannot and should not be set by a user, it is
 	// used internally to store the association of hosts to an upstream service.
 	IngressHosts []string `json:"-" bexpr:"-"`
+
+	// CentrallyConfigured indicates whether the upstream was defined in a proxy
+	// instance registration or whether it was generated from a config entry.
+	CentrallyConfigured bool `json:",omitempty" bexpr:"-"`
 }
 
 func (t *Upstream) UnmarshalJSON(data []byte) (err error) {
@@ -267,6 +390,9 @@ func (t *Upstream) UnmarshalJSON(data []byte) (err error) {
 
 		LocalBindAddressSnake string `json:"local_bind_address"`
 		LocalBindPortSnake    int    `json:"local_bind_port"`
+
+		LocalBindSocketPathSnake string `json:"local_bind_socket_path"`
+		LocalBindSocketModeSnake string `json:"local_bind_socket_mode"`
 
 		MeshGatewaySnake MeshGatewayConfig `json:"mesh_gateway"`
 
@@ -292,6 +418,12 @@ func (t *Upstream) UnmarshalJSON(data []byte) (err error) {
 	if t.LocalBindPort == 0 {
 		t.LocalBindPort = aux.LocalBindPortSnake
 	}
+	if t.LocalBindSocketPath == "" {
+		t.LocalBindSocketPath = aux.LocalBindSocketPathSnake
+	}
+	if t.LocalBindSocketMode == "" {
+		t.LocalBindSocketMode = aux.LocalBindSocketModeSnake
+	}
 	if t.MeshGateway.Mode == "" {
 		t.MeshGateway.Mode = aux.MeshGatewaySnake.Mode
 	}
@@ -311,10 +443,17 @@ func (u *Upstream) Validate() error {
 	if u.DestinationName == "" {
 		return fmt.Errorf("upstream destination name cannot be empty")
 	}
-
-	if u.LocalBindPort == 0 {
-		return fmt.Errorf("upstream local bind port cannot be zero")
+	if u.DestinationName == WildcardSpecifier && !u.CentrallyConfigured {
+		return fmt.Errorf("upstream destination name cannot be a wildcard")
 	}
+
+	if u.LocalBindPort == 0 && u.LocalBindSocketPath == "" && !u.CentrallyConfigured {
+		return fmt.Errorf("upstream local bind port or local socket path must be defined and nonzero")
+	}
+	if u.LocalBindPort != 0 && u.LocalBindSocketPath != "" && !u.CentrallyConfigured {
+		return fmt.Errorf("only one of upstream local bind port or local socket path can be defined and nonzero")
+	}
+
 	return nil
 }
 
@@ -330,6 +469,8 @@ func (u *Upstream) ToAPI() api.Upstream {
 		Datacenter:           u.Datacenter,
 		LocalBindAddress:     u.LocalBindAddress,
 		LocalBindPort:        u.LocalBindPort,
+		LocalBindSocketPath:  u.LocalBindSocketPath,
+		LocalBindSocketMode:  u.LocalBindSocketMode,
 		Config:               u.Config,
 		MeshGateway:          u.MeshGateway.ToAPI(),
 	}
@@ -350,6 +491,26 @@ func (u *Upstream) ToKey() UpstreamKey {
 	}
 }
 
+func (u Upstream) HasLocalPortOrSocket() bool {
+	return (u.LocalBindPort != 0 || u.LocalBindSocketPath != "")
+}
+
+func (u Upstream) UpstreamIsUnixSocket() bool {
+	return (u.LocalBindPort == 0 && u.LocalBindAddress == "" && u.LocalBindSocketPath != "")
+}
+
+func (u Upstream) UpstreamAddressToString() string {
+	if u.UpstreamIsUnixSocket() {
+		return u.LocalBindSocketPath
+	}
+
+	addr := u.LocalBindAddress
+	if addr == "" {
+		addr = "127.0.0.1"
+	}
+	return net.JoinHostPort(addr, fmt.Sprintf("%d", u.LocalBindPort))
+}
+
 type UpstreamKey struct {
 	DestinationType      string
 	DestinationName      string
@@ -367,28 +528,6 @@ func (k UpstreamKey) String() string {
 	)
 }
 
-// Identifier returns a string representation that uniquely identifies the
-// upstream in a canonical but human readable way.
-func (u *Upstream) Identifier() string {
-	name := u.DestinationName
-	typ := u.DestinationType
-
-	if typ != UpstreamDestTypePreparedQuery && u.DestinationNamespace != "" && u.DestinationNamespace != IntentionDefaultNamespace {
-		name = u.DestinationNamespace + "/" + u.DestinationName
-	}
-	if u.Datacenter != "" {
-		name += "?dc=" + u.Datacenter
-	}
-
-	// Service is default type so never prefix it. This is more readable and long
-	// term it is the only type that matters so we can drop the prefix and have
-	// nicer naming in metrics etc.
-	if typ == "" || typ == UpstreamDestTypeService {
-		return name
-	}
-	return typ + ":" + name
-}
-
 // String implements Stringer by returning the Identifier.
 func (u *Upstream) String() string {
 	return u.Identifier()
@@ -403,6 +542,8 @@ func UpstreamFromAPI(u api.Upstream) Upstream {
 		Datacenter:           u.Datacenter,
 		LocalBindAddress:     u.LocalBindAddress,
 		LocalBindPort:        u.LocalBindPort,
+		LocalBindSocketPath:  u.LocalBindSocketPath,
+		LocalBindSocketMode:  u.LocalBindSocketMode,
 		Config:               u.Config,
 	}
 }

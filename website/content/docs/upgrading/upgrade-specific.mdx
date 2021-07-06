@@ -1,7 +1,6 @@
 ---
 layout: docs
 page_title: Upgrading Specific Versions
-sidebar_title: Specific Version Details
 description: >-
   Specific versions of Consul may have additional information about the upgrade
   process beyond the standard flow.
@@ -15,14 +14,115 @@ provided for their upgrades as a result of new features or changed behavior.
 This page is used to document those details separately from the standard
 upgrade flow.
 
+## Consul 1.10.0
+
+### Licensing Changes <EnterpriseAlert inline />
+
+Consul Enterprise 1.10 has removed temporary licensing capabilities from the binaries
+found on https://releases.hashicorp.com. Servers will no longer load a license previously
+set through the CLI or API. Instead the license must be present in the server's configuration
+or environment prior to starting. See the [licensing documentation](/docs/enterprise/license/overview) 
+for more information about how to configure the license. Client agents previously retrieved their
+license from the servers in the cluster within 30 minutes of starting and the snapshot agent
+would similarly retrieve its license from the server or client agent it was configured to use. As
+of Consul Enterprise 1.10 both the snapshot agent and client agent have gained the ability to
+have a license loaded from a configuration file or from their environment the same way server
+agents must have the license specified. Both agents can still perform automatic retrieval of their
+license but with a few extra stipulations. First, license auto-retrieval now requires that ACLs
+are on and that the client or snapshot agent is configured with a valid ACL token. Secondly, client
+agents require that either the [`start_join`](/docs/agent/options#start_join) or
+[`retry_join`](/docs/agent/options#retry_join) configurations are set and that they resolve to server
+agents. If those stipulations are not met, attempting to start the client or snapshot agent will
+result in it immediately shutting down.
+
+For the step by step upgrade procedures see the [Upgrading to 1.10.0](/docs/upgrading/instructions/upgrade-to-1-10-x) documentation.
+For answers to common licensing questions please refer to the [FAQ](/docs/enterprise/license/faq)
+
+### Envoy xDS Protocol Upgrades
+
+Consul versions 1.9 and earlier exposed an xDS server for use by
+[Envoy](https://www.envoyproxy.io) proxies using the v2 ["State of the
+World"](https://www.envoyproxy.io/docs/envoy/v1.17.2/api-docs/xds_protocol#variants-of-the-xds-transport-protocol)
+protocol variant.
+
+Consul 1.10.0 adds support for the v3
+[Incremental](https://www.envoyproxy.io/docs/envoy/v1.17.2/api-docs/xds_protocol#incremental-xds)
+protocol variant as the preferred way of conversing with Envoy. Both protocol
+variants are supported in this Consul version to facilitate upgrading Consul
+and Envoy in a stairstep order to avoid downtime.
+
+In a future version of Consul the v2 State of the World protocol support will
+be removed.
+
+| Protocol           | Version | Compatible Envoy Versions      | Compatible Consul Versions |
+| ------------------ | ------- | ------------------------------ | -------------------------- |
+| Incremental        | v3      | 1.18.x, 1.17.x, 1.16.x, 1.15.x | 1.10.x                     |
+| State of the World | v2      | 1.16.x and older               | 1.10.x and older           |
+
+#### Escape Hatches
+
+Any [escape hatches](/docs/connect/proxies/envoy#advanced-configuration) that
+are defined will likely need to be switched from using xDS v2 to xDS v3
+structures. Mostly this involves migrating off of deprecated (and now removed)
+fields and switching untyped config to [typed config](https://www.envoyproxy.io/docs/envoy/v1.17.2/configuration/overview/extension)
+with `@type` attributes set appropriately.
+
+xDS v3 syntax has been [supported since Envoy
+1.13.0](https://www.envoyproxy.io/docs/envoy/v1.13.0/api-v3/api) so this could
+be done on most earlier versions of Consul+Envoy in advance of the Consul
+1.10.0 upgrade.
+
+As an example, here's a Zipkin integration
+[before](https://github.com/hashicorp/consul/blob/v1.9.5/test/integration/connect/envoy/case-zipkin/service_s2.hcl)
+and [after](https://github.com/hashicorp/consul/blob/71d45a34601423abdfc0a64d44c6a55cf88fa2fc/test/integration/connect/envoy/case-zipkin/service_s2.hcl)
+
+#### Stairstep Upgrade Path
+
+1. Upgrade Envoy sidecars to the latest version of Envoy that is
+   [supported](/docs/connect/proxies/envoy#supported-versions) by the currently
+   running version of Consul as well as Consul 1.10.0.
+
+1. Determine if you are using the [escape hatch](/docs/connect/proxies/envoy#advanced-configuration)
+   feature. If so, rewrite the escape hatch to use the xDS v3 syntax and update
+   the service registration to reflect the updated escape hatch configuration
+   by re-registering. This should purge v2 elements from any configs.
+
+1. Perform a normal upgrade of both Consul servers and clients to 1.10.0. At
+   this point the existing Envoy instances will continue to speak the v2 State
+   of the World protocol to the new Consul instances without issue.
+
+1. Once a Consul client is upgraded, use an updated CLI binary to re-bootstrap
+   and restart Envoy using [`consul connect envoy`](/commands/connect/envoy).
+   This will ensure it switches over to the v3 Incremental xDS protocol.
+
+   Depending upon how you have chosen to run Envoy this is either one step
+   (`consul connect envoy`) or two steps (`consul connect envoy -bootstrap`
+   followed by running Envoy directly).
+
+1. (Optionally) upgrade Envoy to the latest version supported in Consul 1.10.0.
+
+### Transparent Proxy on Kubernetes
+
+When upgrading to Consul >= 1.10.0, Consul-helm >= 0.32.0, and Consul-k8s >= 0.26.0, a Kubernetes Service must be added for every service registered to Consul. This Service should be added before
+performing the upgrade. This will allow services to be managed by a central component, called `endpoints-controller`, which will enable features like
+transparent proxy.
+
+After the upgrade is performed, all Pods of a service will need to be restarted. The service will be up and health
+checks will continue to work without restarting the service, but a restart is required so the Pods can be re-injected with the latest
+container configuration.
+
+
 ## Consul 1.9.0
 
 ### Changes to Raft Protocol Support
 
 Consul 1.8 supported Raft protocols 2 and 3. Consul 1.9.0 now only supports
-Raft protocol 3 so before upgrading to Consul 1.9.0 users may have to first
-upgrade to a previous release supporting both protocol versions and upgrade
-the protocol in use to version 3.
+Raft protocol 3. Consul has defaulted to using Raft protocol 3 since version 1.0.0,
+so this should only impact users who have been using Consul prior to 1.0.0 and
+may have the `raft_protocol` config setting set to 2. Users in that position
+should upgrade to a previous release supporting both protocol versions and
+update their configuration to use Raft protocol 3 before continuing their upgrade
+to Consul 1.9.0.
 
 ### Changes to Configuration Defaults
 

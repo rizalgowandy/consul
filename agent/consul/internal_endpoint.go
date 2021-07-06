@@ -3,14 +3,15 @@ package consul
 import (
 	"fmt"
 
-	"github.com/hashicorp/consul/acl"
-	"github.com/hashicorp/consul/agent/consul/state"
-	"github.com/hashicorp/consul/agent/structs"
 	bexpr "github.com/hashicorp/go-bexpr"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-memdb"
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/serf/serf"
+
+	"github.com/hashicorp/consul/acl"
+	"github.com/hashicorp/consul/agent/consul/state"
+	"github.com/hashicorp/consul/agent/structs"
 )
 
 // Internal endpoint is used to query the miscellaneous info that
@@ -24,7 +25,7 @@ type Internal struct {
 // NodeInfo is used to retrieve information about a specific node.
 func (m *Internal) NodeInfo(args *structs.NodeSpecificRequest,
 	reply *structs.IndexedNodeDump) error {
-	if done, err := m.srv.ForwardRPC("Internal.NodeInfo", args, args, reply); done {
+	if done, err := m.srv.ForwardRPC("Internal.NodeInfo", args, reply); done {
 		return err
 	}
 
@@ -50,7 +51,7 @@ func (m *Internal) NodeInfo(args *structs.NodeSpecificRequest,
 // NodeDump is used to generate information about all of the nodes.
 func (m *Internal) NodeDump(args *structs.DCSpecificRequest,
 	reply *structs.IndexedNodeDump) error {
-	if done, err := m.srv.ForwardRPC("Internal.NodeDump", args, args, reply); done {
+	if done, err := m.srv.ForwardRPC("Internal.NodeDump", args, reply); done {
 		return err
 	}
 
@@ -89,7 +90,7 @@ func (m *Internal) NodeDump(args *structs.DCSpecificRequest,
 }
 
 func (m *Internal) ServiceDump(args *structs.ServiceDumpRequest, reply *structs.IndexedNodesWithGateways) error {
-	if done, err := m.srv.ForwardRPC("Internal.ServiceDump", args, args, reply); done {
+	if done, err := m.srv.ForwardRPC("Internal.ServiceDump", args, reply); done {
 		return err
 	}
 
@@ -145,7 +146,7 @@ func (m *Internal) ServiceDump(args *structs.ServiceDumpRequest, reply *structs.
 }
 
 func (m *Internal) ServiceTopology(args *structs.ServiceSpecificRequest, reply *structs.IndexedServiceTopology) error {
-	if done, err := m.srv.ForwardRPC("Internal.ServiceTopology", args, args, reply); done {
+	if done, err := m.srv.ForwardRPC("Internal.ServiceTopology", args, reply); done {
 		return err
 	}
 	if args.ServiceName == "" {
@@ -188,9 +189,52 @@ func (m *Internal) ServiceTopology(args *structs.ServiceSpecificRequest, reply *
 		})
 }
 
+// IntentionUpstreams returns the upstreams of a service. Upstreams are inferred from intentions.
+// If intentions allow a connection from the target to some candidate service, the candidate service is considered
+// an upstream of the target.
+func (m *Internal) IntentionUpstreams(args *structs.ServiceSpecificRequest, reply *structs.IndexedServiceList) error {
+	// Exit early if Connect hasn't been enabled.
+	if !m.srv.config.ConnectEnabled {
+		return ErrConnectNotEnabled
+	}
+	if args.ServiceName == "" {
+		return fmt.Errorf("Must provide a service name")
+	}
+	if done, err := m.srv.ForwardRPC("Internal.IntentionUpstreams", args, reply); done {
+		return err
+	}
+
+	authz, err := m.srv.ResolveTokenAndDefaultMeta(args.Token, &args.EnterpriseMeta, nil)
+	if err != nil {
+		return err
+	}
+	if err := m.srv.validateEnterpriseRequest(&args.EnterpriseMeta, false); err != nil {
+		return err
+	}
+
+	return m.srv.blockingQuery(
+		&args.QueryOptions,
+		&reply.QueryMeta,
+		func(ws memdb.WatchSet, state *state.Store) error {
+			defaultDecision := acl.Allow
+			if authz != nil {
+				defaultDecision = authz.IntentionDefaultAllow(nil)
+			}
+
+			sn := structs.NewServiceName(args.ServiceName, &args.EnterpriseMeta)
+			index, services, err := state.IntentionTopology(ws, sn, false, defaultDecision)
+			if err != nil {
+				return err
+			}
+
+			reply.Index, reply.Services = index, services
+			return m.srv.filterACLWithAuthorizer(authz, reply)
+		})
+}
+
 // GatewayServiceNodes returns all the nodes for services associated with a gateway along with their gateway config
 func (m *Internal) GatewayServiceDump(args *structs.ServiceSpecificRequest, reply *structs.IndexedServiceDump) error {
-	if done, err := m.srv.ForwardRPC("Internal.GatewayServiceDump", args, args, reply); done {
+	if done, err := m.srv.ForwardRPC("Internal.GatewayServiceDump", args, reply); done {
 		return err
 	}
 
@@ -269,7 +313,7 @@ func (m *Internal) GatewayServiceDump(args *structs.ServiceSpecificRequest, repl
 // Match returns the set of intentions that match the given source/destination.
 func (m *Internal) GatewayIntentions(args *structs.IntentionQueryRequest, reply *structs.IndexedIntentions) error {
 	// Forward if necessary
-	if done, err := m.srv.ForwardRPC("Internal.GatewayIntentions", args, args, reply); done {
+	if done, err := m.srv.ForwardRPC("Internal.GatewayIntentions", args, reply); done {
 		return err
 	}
 
@@ -355,7 +399,7 @@ func (m *Internal) GatewayIntentions(args *structs.IntentionQueryRequest, reply 
 // triggered in a remote DC.
 func (m *Internal) EventFire(args *structs.EventFireRequest,
 	reply *structs.EventFireResponse) error {
-	if done, err := m.srv.ForwardRPC("Internal.EventFire", args, args, reply); done {
+	if done, err := m.srv.ForwardRPC("Internal.EventFire", args, reply); done {
 		return err
 	}
 

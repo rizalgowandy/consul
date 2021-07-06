@@ -8,7 +8,7 @@ GOTOOLS = \
 	github.com/gogo/protobuf/protoc-gen-gofast@$(GOGOVERSION) \
 	github.com/hashicorp/protoc-gen-go-binary \
 	github.com/vektra/mockery/cmd/mockery \
-	github.com/golangci/golangci-lint/cmd/golangci-lint@v1.23.6
+	github.com/golangci/golangci-lint/cmd/golangci-lint@v1.40.1
 
 GOTAGS ?=
 GOOS?=$(shell go env GOOS)
@@ -315,10 +315,12 @@ ui: ui-docker static-assets-docker
 
 tools:
 	@mkdir -p .gotools
-	@cd .gotools && if [[ ! -f go.mod ]]; then \
+	@cd .gotools && for TOOL in $(GOTOOLS); do \
+		echo "=== TOOL: $$TOOL" ; \
+		rm -f go.mod go.sum ; \
 		go mod init consul-tools ; \
-	fi
-	cd .gotools && go get -v $(GOTOOLS)
+		go get -v $$TOOL ; \
+	done
 
 version:
 	@echo -n "Version:                    "
@@ -382,6 +384,21 @@ proto: $(PROTOGOFILES) $(PROTOGOBINFILES)
 module-versions:
 	@go list -m -u -f '{{if .Update}} {{printf "%-50v %-40s" .Path .Version}} {{with .Time}} {{ .Format "2006-01-02" -}} {{else}} {{printf "%9s" ""}} {{end}}   {{ .Update.Version}} {{end}}' all
 
+.PHONY: envoy-library
+envoy-library:
+	@$(SHELL) $(CURDIR)/build-support/scripts/envoy-library-references.sh
+
+.PHONY: envoy-regen
+envoy-regen:
+	$(info regenerating envoy golden files)
+	@for d in endpoints listeners routes clusters rbac; do \
+		if [[ -d "agent/xds/testdata/$${d}" ]]; then \
+			find "agent/xds/testdata/$${d}" -name '*.golden' -delete ; \
+		fi \
+	done
+	@go test -tags '$(GOTAGS)' ./agent/xds -update
+	@find "command/connect/envoy/testdata" -name '*.golden' -delete
+	@go test -tags '$(GOTAGS)' ./command/connect/envoy -update
 
 .PHONY: all ci bin dev dist cov test test-flake test-internal cover lint ui static-assets tools
 .PHONY: docker-images go-build-image ui-build-image static-assets-docker consul-docker ui-docker

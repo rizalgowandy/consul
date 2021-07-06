@@ -49,6 +49,7 @@ import (
 	"github.com/hashicorp/consul/lib"
 	"github.com/hashicorp/consul/lib/file"
 	"github.com/hashicorp/consul/lib/mutex"
+	"github.com/hashicorp/consul/lib/routine"
 	"github.com/hashicorp/consul/logging"
 	"github.com/hashicorp/consul/tlsutil"
 	"github.com/hashicorp/consul/types"
@@ -204,6 +205,9 @@ type Agent struct {
 	// checkHTTPs maps the check ID to an associated HTTP check
 	checkHTTPs map[structs.CheckID]*checks.CheckHTTP
 
+	// checkH2PINGs maps the check ID to an associated HTTP2 PING check
+	checkH2PINGs map[structs.CheckID]*checks.CheckH2PING
+
 	// checkTCPs maps the check ID to an associated TCP check
 	checkTCPs map[structs.CheckID]*checks.CheckTCP
 
@@ -324,6 +328,10 @@ type Agent struct {
 	// into Agent, which will allow us to remove this field.
 	rpcClientHealth *health.Client
 
+	// routineManager is responsible for managing longer running go routines
+	// run by the Agent
+	routineManager *routine.Manager
+
 	// enterpriseAgent embeds fields that we only access in consul-enterprise builds
 	enterpriseAgent
 }
@@ -349,6 +357,7 @@ func New(bd BaseDeps) (*Agent, error) {
 		checkMonitors:   make(map[structs.CheckID]*checks.CheckMonitor),
 		checkTTLs:       make(map[structs.CheckID]*checks.CheckTTL),
 		checkHTTPs:      make(map[structs.CheckID]*checks.CheckHTTP),
+		checkH2PINGs:    make(map[structs.CheckID]*checks.CheckH2PING),
 		checkTCPs:       make(map[structs.CheckID]*checks.CheckTCP),
 		checkGRPCs:      make(map[structs.CheckID]*checks.CheckGRPC),
 		checkDockers:    make(map[structs.CheckID]*checks.CheckDocker),
@@ -367,26 +376,28 @@ func New(bd BaseDeps) (*Agent, error) {
 		tlsConfigurator: bd.TLSConfigurator,
 		config:          bd.RuntimeConfig,
 		cache:           bd.Cache,
+		routineManager:  routine.NewManager(bd.Logger),
 	}
 
-	cacheName := cachetype.HealthServicesName
-	if bd.RuntimeConfig.UseStreamingBackend {
-		cacheName = cachetype.StreamingHealthServicesName
-	}
-	a.rpcClientHealth = &health.Client{
-		Cache:     bd.Cache,
-		NetRPC:    &a,
-		CacheName: cacheName,
-	}
-
-	a.serviceManager = NewServiceManager(&a)
-
-	// TODO: do this somewhere else, maybe move to newBaseDeps
-	var err error
-	a.aclMasterAuthorizer, err = initializeACLs(bd.RuntimeConfig.NodeName)
+	// TODO: create rpcClientHealth in BaseDeps once NetRPC is available without Agent
+	conn, err := bd.GRPCConnPool.ClientConn(bd.RuntimeConfig.Datacenter)
 	if err != nil {
 		return nil, err
 	}
+
+	a.rpcClientHealth = &health.Client{
+		Cache:     bd.Cache,
+		NetRPC:    &a,
+		CacheName: cachetype.HealthServicesName,
+		ViewStore: bd.ViewStore,
+		MaterializerDeps: health.MaterializerDeps{
+			Conn:   conn,
+			Logger: bd.Logger.Named("rpcclient.health"),
+		},
+		UseStreamingBackend: a.config.UseStreamingBackend,
+	}
+
+	a.serviceManager = NewServiceManager(&a)
 
 	// We used to do this in the Start method. However it doesn't need to go
 	// there any longer. Originally it did because we passed the agent
@@ -451,6 +462,10 @@ func (a *Agent) Start(ctx context.Context) error {
 
 	if err := a.tlsConfigurator.Update(a.config.ToTLSUtilConfig()); err != nil {
 		return fmt.Errorf("Failed to load TLS configurations after applying auto-config settings: %w", err)
+	}
+
+	if err := a.startLicenseManager(ctx); err != nil {
+		return err
 	}
 
 	// create the local state
@@ -535,6 +550,8 @@ func (a *Agent) Start(ctx context.Context) error {
 		return fmt.Errorf("unexpected ACL default policy value of %q", a.config.ACLDefaultPolicy)
 	}
 
+	go a.baseDeps.ViewStore.Run(&lib.StopChannelContext{StopCh: a.shutdownCh})
+
 	// Start the proxy config manager.
 	a.proxyConfig, err = proxycfg.NewManager(proxycfg.ManagerConfig{
 		Cache:  a.cache,
@@ -542,7 +559,6 @@ func (a *Agent) Start(ctx context.Context) error {
 		Logger: a.logger.Named(logging.ProxyConfig),
 		State:  a.State,
 		Source: &structs.QuerySource{
-			Node:       a.config.NodeName,
 			Datacenter: a.config.Datacenter,
 			Segment:    a.config.SegmentName,
 		},
@@ -650,14 +666,15 @@ func (a *Agent) listenAndServeGRPC() error {
 		return nil
 	}
 
-	xdsServer := &xds.Server{
-		Logger:             a.logger.Named(logging.Envoy),
-		CfgMgr:             a.proxyConfig,
-		ResolveToken:       a.resolveToken,
-		CheckFetcher:       a,
-		CfgFetcher:         a,
-		AuthCheckFrequency: xds.DefaultAuthCheckFrequency,
-	}
+	xdsServer := xds.NewServer(
+		a.logger.Named(logging.Envoy),
+		a.proxyConfig,
+		func(id string) (acl.Authorizer, error) {
+			return a.delegate.ResolveTokenAndDefaultMeta(id, nil, nil)
+		},
+		a,
+		a,
+	)
 
 	tlsConfig := a.tlsConfigurator
 	// gRPC uses the same TLS settings as the HTTPS API. If HTTPS is not enabled
@@ -1333,6 +1350,8 @@ func (a *Agent) ShutdownAgent() error {
 	// Stop the watches to avoid any notification/state change during shutdown
 	a.stopAllWatches()
 
+	a.stopLicenseManager()
+
 	// this would be cancelled anyways (by the closing of the shutdown ch) but
 	// this should help them to be stopped more quickly
 	a.baseDeps.AutoConfig.Stop()
@@ -1366,6 +1385,9 @@ func (a *Agent) ShutdownAgent() error {
 	for _, chk := range a.checkAliases {
 		chk.Stop()
 	}
+	for _, chk := range a.checkH2PINGs {
+		chk.Stop()
+	}
 
 	// Stop gRPC
 	if a.grpcServer != nil {
@@ -1381,6 +1403,8 @@ func (a *Agent) ShutdownAgent() error {
 	if a.cache != nil {
 		a.cache.Close()
 	}
+
+	a.rpcClientHealth.Close()
 
 	var err error
 	if a.delegate != nil {
@@ -2517,7 +2541,7 @@ func (a *Agent) addCheck(check *structs.HealthCheck, chkType *structs.CheckType,
 				chkType.Interval = checks.MinInterval
 			}
 
-			tlsClientConfig := a.tlsConfigurator.OutgoingTLSConfigForCheck(chkType.TLSSkipVerify)
+			tlsClientConfig := a.tlsConfigurator.OutgoingTLSConfigForCheck(chkType.TLSSkipVerify, chkType.TLSServerName)
 
 			http := &checks.CheckHTTP{
 				CheckID:         cid,
@@ -2544,6 +2568,7 @@ func (a *Agent) addCheck(check *structs.HealthCheck, chkType *structs.CheckType,
 					return err
 				}
 				http.ProxyHTTP = httpInjectAddr(http.HTTP, proxy.Address, port)
+				check.ExposedPort = port
 			}
 
 			http.Start()
@@ -2589,7 +2614,7 @@ func (a *Agent) addCheck(check *structs.HealthCheck, chkType *structs.CheckType,
 
 			var tlsClientConfig *tls.Config
 			if chkType.GRPCUseTLS {
-				tlsClientConfig = a.tlsConfigurator.OutgoingTLSConfigForCheck(chkType.TLSSkipVerify)
+				tlsClientConfig = a.tlsConfigurator.OutgoingTLSConfigForCheck(chkType.TLSSkipVerify, chkType.TLSServerName)
 			}
 
 			grpc := &checks.CheckGRPC{
@@ -2613,6 +2638,7 @@ func (a *Agent) addCheck(check *structs.HealthCheck, chkType *structs.CheckType,
 					return err
 				}
 				grpc.ProxyGRPC = grpcInjectAddr(grpc.GRPC, proxy.Address, port)
+				check.ExposedPort = port
 			}
 
 			grpc.Start()
@@ -2683,6 +2709,36 @@ func (a *Agent) addCheck(check *structs.HealthCheck, chkType *structs.CheckType,
 			}
 			monitor.Start()
 			a.checkMonitors[cid] = monitor
+
+		case chkType.IsH2PING():
+			if existing, ok := a.checkH2PINGs[cid]; ok {
+				existing.Stop()
+				delete(a.checkH2PINGs, cid)
+			}
+			if chkType.Interval < checks.MinInterval {
+				a.logger.Warn("check has interval below minimum",
+					"check", cid.String(),
+					"minimum_interval", checks.MinInterval,
+				)
+				chkType.Interval = checks.MinInterval
+			}
+
+			tlsClientConfig := a.tlsConfigurator.OutgoingTLSConfigForCheck(chkType.TLSSkipVerify, chkType.TLSServerName)
+			tlsClientConfig.NextProtos = []string{http2.NextProtoTLS}
+
+			h2ping := &checks.CheckH2PING{
+				CheckID:         cid,
+				ServiceID:       sid,
+				H2PING:          chkType.H2PING,
+				Interval:        chkType.Interval,
+				Timeout:         chkType.Timeout,
+				Logger:          a.logger,
+				TLSClientConfig: tlsClientConfig,
+				StatusHandler:   statusHandler,
+			}
+
+			h2ping.Start()
+			a.checkH2PINGs[cid] = h2ping
 
 		case chkType.IsAlias():
 			if existing, ok := a.checkAliases[cid]; ok {
@@ -2889,6 +2945,11 @@ func (a *Agent) cancelCheckMonitors(checkID structs.CheckID) {
 		check.Stop()
 		delete(a.checkDockers, checkID)
 	}
+	if check, ok := a.checkH2PINGs[checkID]; ok {
+		check.Stop()
+		delete(a.checkH2PINGs, checkID)
+	}
+
 }
 
 // updateTTLCheck is used to update the status of a TTL check via the Agent API.
@@ -3023,6 +3084,17 @@ func (a *Agent) Stats() map[string]map[string]string {
 		"version":    a.config.Version,
 		"prerelease": a.config.VersionPrerelease,
 	}
+
+	for outerKey, outerValue := range a.enterpriseStats() {
+		if _, ok := stats[outerKey]; ok {
+			for innerKey, innerValue := range outerValue {
+				stats[outerKey][innerKey] = innerValue
+			}
+		} else {
+			stats[outerKey] = outerValue
+		}
+	}
+
 	return stats
 }
 
@@ -3593,10 +3665,13 @@ func (a *Agent) reloadConfigInternal(newCfg *config.RuntimeConfig) error {
 	}
 
 	cc := consul.ReloadableConfig{
-		RPCRateLimit:         newCfg.RPCRateLimit,
-		RPCMaxBurst:          newCfg.RPCMaxBurst,
-		RPCMaxConnsPerClient: newCfg.RPCMaxConnsPerClient,
-		ConfigEntryBootstrap: newCfg.ConfigEntryBootstrap,
+		RPCRateLimit:          newCfg.RPCRateLimit,
+		RPCMaxBurst:           newCfg.RPCMaxBurst,
+		RPCMaxConnsPerClient:  newCfg.RPCMaxConnsPerClient,
+		ConfigEntryBootstrap:  newCfg.ConfigEntryBootstrap,
+		RaftSnapshotThreshold: newCfg.RaftSnapshotThreshold,
+		RaftSnapshotInterval:  newCfg.RaftSnapshotInterval,
+		RaftTrailingLogs:      newCfg.RaftTrailingLogs,
 	}
 	if err := a.delegate.ReloadConfig(cc); err != nil {
 		return err
@@ -3708,6 +3783,8 @@ func (a *Agent) registerCache() {
 
 	a.cache.RegisterType(cachetype.IntentionMatchName, &cachetype.IntentionMatch{RPC: a})
 
+	a.cache.RegisterType(cachetype.IntentionUpstreamsName, &cachetype.IntentionUpstreams{RPC: a})
+
 	a.cache.RegisterType(cachetype.CatalogServicesName, &cachetype.CatalogServices{RPC: a})
 
 	a.cache.RegisterType(cachetype.HealthServicesName, &cachetype.HealthServices{RPC: a})
@@ -3758,6 +3835,8 @@ func (a *Agent) rerouteExposedChecks(serviceID structs.ServiceID, proxyAddr stri
 			return err
 		}
 		c.ProxyHTTP = httpInjectAddr(c.HTTP, proxyAddr, port)
+		hc := a.State.Check(cid)
+		hc.ExposedPort = port
 	}
 	for cid, c := range a.checkGRPCs {
 		if c.ServiceID != serviceID {
@@ -3768,6 +3847,8 @@ func (a *Agent) rerouteExposedChecks(serviceID structs.ServiceID, proxyAddr stri
 			return err
 		}
 		c.ProxyGRPC = grpcInjectAddr(c.GRPC, proxyAddr, port)
+		hc := a.State.Check(cid)
+		hc.ExposedPort = port
 	}
 	return nil
 }
@@ -3780,12 +3861,16 @@ func (a *Agent) resetExposedChecks(serviceID structs.ServiceID) {
 	for cid, c := range a.checkHTTPs {
 		if c.ServiceID == serviceID {
 			c.ProxyHTTP = ""
+			hc := a.State.Check(cid)
+			hc.ExposedPort = 0
 			ids = append(ids, cid)
 		}
 	}
 	for cid, c := range a.checkGRPCs {
 		if c.ServiceID == serviceID {
 			c.ProxyGRPC = ""
+			hc := a.State.Check(cid)
+			hc.ExposedPort = 0
 			ids = append(ids, cid)
 		}
 	}

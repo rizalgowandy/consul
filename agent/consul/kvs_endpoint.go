@@ -7,12 +7,13 @@ import (
 
 	"github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
+	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/go-memdb"
+
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/consul/state"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/api"
-	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/go-memdb"
 )
 
 var KVSummaries = []prometheus.SummaryDefinition{
@@ -95,7 +96,7 @@ func kvsPreApply(logger hclog.Logger, srv *Server, authz acl.Authorizer, op api.
 
 // Apply is used to apply a KVS update request to the data store.
 func (k *KVS) Apply(args *structs.KVSRequest, reply *bool) error {
-	if done, err := k.srv.ForwardRPC("KVS.Apply", args, args, reply); done {
+	if done, err := k.srv.ForwardRPC("KVS.Apply", args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"kvs", "apply"}, time.Now())
@@ -122,11 +123,7 @@ func (k *KVS) Apply(args *structs.KVSRequest, reply *bool) error {
 	// Apply the update.
 	resp, err := k.srv.raftApply(structs.KVSRequestType, args)
 	if err != nil {
-		k.logger.Error("Raft apply failed", "error", err)
-		return err
-	}
-	if respErr, ok := resp.(error); ok {
-		return respErr
+		return fmt.Errorf("raft apply failed: %w", err)
 	}
 
 	// Check if the return type is a bool.
@@ -138,7 +135,7 @@ func (k *KVS) Apply(args *structs.KVSRequest, reply *bool) error {
 
 // Get is used to lookup a single key.
 func (k *KVS) Get(args *structs.KeyRequest, reply *structs.IndexedDirEntries) error {
-	if done, err := k.srv.ForwardRPC("KVS.Get", args, args, reply); done {
+	if done, err := k.srv.ForwardRPC("KVS.Get", args, reply); done {
 		return err
 	}
 
@@ -183,7 +180,7 @@ func (k *KVS) Get(args *structs.KeyRequest, reply *structs.IndexedDirEntries) er
 
 // List is used to list all keys with a given prefix.
 func (k *KVS) List(args *structs.KeyRequest, reply *structs.IndexedDirEntries) error {
-	if done, err := k.srv.ForwardRPC("KVS.List", args, args, reply); done {
+	if done, err := k.srv.ForwardRPC("KVS.List", args, reply); done {
 		return err
 	}
 
@@ -235,7 +232,7 @@ func (k *KVS) List(args *structs.KeyRequest, reply *structs.IndexedDirEntries) e
 // of the response so that only a subset of the prefix is returned. In this
 // mode, the keys which are omitted are still counted in the returned index.
 func (k *KVS) ListKeys(args *structs.KeyListRequest, reply *structs.IndexedKeyList) error {
-	if done, err := k.srv.ForwardRPC("KVS.ListKeys", args, args, reply); done {
+	if done, err := k.srv.ForwardRPC("KVS.ListKeys", args, reply); done {
 		return err
 	}
 

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -33,17 +34,14 @@ type DCWrapper func(dc string, conn net.Conn) (net.Conn, error)
 // a constant value. This is usually done by currying DCWrapper.
 type Wrapper func(conn net.Conn) (net.Conn, error)
 
-// TLSLookup maps the tls_min_version configuration to the internal value
-var TLSLookup = map[string]uint16{
+// tlsLookup maps the tls_min_version configuration to the internal value
+var tlsLookup = map[string]uint16{
 	"":      tls.VersionTLS10, // default in golang
 	"tls10": tls.VersionTLS10,
 	"tls11": tls.VersionTLS11,
 	"tls12": tls.VersionTLS12,
 	"tls13": tls.VersionTLS13,
 }
-
-// TLSVersions has all the keys from the map above.
-var TLSVersions = strings.Join(tlsVersions(), ", ")
 
 // Config used to create tls.Config
 type Config struct {
@@ -132,18 +130,13 @@ type Config struct {
 
 func tlsVersions() []string {
 	versions := []string{}
-	for v := range TLSLookup {
+	for v := range tlsLookup {
 		if v != "" {
 			versions = append(versions, v)
 		}
 	}
 	sort.Strings(versions)
 	return versions
-}
-
-// KeyPair is used to open and parse a certificate and key file
-func (c *Config) KeyPair() (*tls.Certificate, error) {
-	return loadKeyPair(c.CertFile, c.KeyFile)
 }
 
 // SpecificDC is used to invoke a static datacenter
@@ -157,6 +150,8 @@ func SpecificDC(dc string, tlsWrap DCWrapper) Wrapper {
 	}
 }
 
+// autoTLS stores configuration that is received from the auto-encrypt or
+// auto-config features.
 type autoTLS struct {
 	manualCAPems         []string
 	connectCAPems        []string
@@ -164,27 +159,38 @@ type autoTLS struct {
 	verifyServerHostname bool
 }
 
-func (a *autoTLS) caPems() []string {
+func (a autoTLS) caPems() []string {
 	return append(a.manualCAPems, a.connectCAPems...)
 }
 
+// manual stores the TLS CA and cert received from Configurator.Update which
+// generally comes from the agent configuration.
 type manual struct {
 	caPems []string
 	cert   *tls.Certificate
 }
 
-// Configurator holds a Config and is responsible for generating all the
-// *tls.Config necessary for Consul. Except the one in the api package.
+// Configurator provides tls.Config and net.Dial wrappers to enable TLS for
+// clients and servers, for both HTTPS and RPC requests.
+// Configurator receives an initial TLS configuration from agent configuration,
+// and receives updates from config reloads, auto-encrypt, and auto-config.
 type Configurator struct {
-	sync.RWMutex
-	base                 *Config
-	autoTLS              *autoTLS
-	manual               *manual
+	// lock synchronizes access to all fields on this struct except for logger and version.
+	lock    sync.RWMutex
+	base    *Config
+	autoTLS autoTLS
+	manual  manual
+	caPool  *x509.CertPool
+	// peerDatacenterUseTLS is a map of DC name to a bool indicating if the DC
+	// uses TLS for RPC requests.
 	peerDatacenterUseTLS map[string]bool
 
-	caPool  *x509.CertPool
-	logger  hclog.Logger
-	version int
+	// logger is not protected by a lock. It must never be changed after
+	// Configurator is created.
+	logger hclog.Logger
+	// version is increased each time the Configurator is updated. Must be accessed
+	// using sync/atomic.
+	version uint64
 }
 
 // NewConfigurator creates a new Configurator and sets the provided
@@ -198,8 +204,6 @@ func NewConfigurator(config Config, logger hclog.Logger) (*Configurator, error) 
 
 	c := &Configurator{
 		logger:               logger.Named(logging.TLSUtil),
-		manual:               &manual{},
-		autoTLS:              &autoTLS{},
 		peerDatacenterUseTLS: map[string]bool{},
 	}
 	err := c.Update(config)
@@ -211,15 +215,15 @@ func NewConfigurator(config Config, logger hclog.Logger) (*Configurator, error) 
 
 // CAPems returns the currently loaded CAs in PEM format.
 func (c *Configurator) CAPems() []string {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	return append(c.manual.caPems, c.autoTLS.caPems()...)
 }
 
 // ManualCAPems returns the currently loaded CAs in PEM format.
 func (c *Configurator) ManualCAPems() []string {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	return c.manual.caPems
 }
 
@@ -227,10 +231,8 @@ func (c *Configurator) ManualCAPems() []string {
 // *tls.Config.
 // This function acquires a write lock because it writes the new config.
 func (c *Configurator) Update(config Config) error {
-	c.Lock()
-	// order of defers matters because log acquires a RLock()
-	defer c.log("Update")
-	defer c.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
 	cert, err := loadKeyPair(config.CertFile, config.KeyFile)
 	if err != nil {
@@ -244,14 +246,15 @@ func (c *Configurator) Update(config Config) error {
 	if err != nil {
 		return err
 	}
-	if err = c.check(config, pool, cert); err != nil {
+	if err = validateConfig(config, pool, cert); err != nil {
 		return err
 	}
 	c.base = &config
 	c.manual.cert = cert
 	c.manual.caPems = pems
 	c.caPool = pool
-	c.version++
+	atomic.AddUint64(&c.version, 1)
+	c.log("Update")
 	return nil
 }
 
@@ -260,55 +263,49 @@ func (c *Configurator) Update(config Config) error {
 // certificates.
 // Or it is being called on the client side when CA changes are detected.
 func (c *Configurator) UpdateAutoTLSCA(connectCAPems []string) error {
-	c.Lock()
-	// order of defers matters because log acquires a RLock()
-	defer c.log("UpdateAutoEncryptCA")
-	defer c.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
 	pool, err := pool(append(c.manual.caPems, append(c.autoTLS.manualCAPems, connectCAPems...)...))
 	if err != nil {
-		c.RUnlock()
 		return err
 	}
-	if err = c.check(*c.base, pool, c.manual.cert); err != nil {
-		c.RUnlock()
+	if err = validateConfig(*c.base, pool, c.manual.cert); err != nil {
 		return err
 	}
 	c.autoTLS.connectCAPems = connectCAPems
 	c.caPool = pool
-	c.version++
+	atomic.AddUint64(&c.version, 1)
+	c.log("UpdateAutoTLSCA")
 	return nil
 }
 
-// UpdateAutoTLSCert
+// UpdateAutoTLSCert receives the updated Auto-Encrypt certificate.
 func (c *Configurator) UpdateAutoTLSCert(pub, priv string) error {
-	// order of defers matters because log acquires a RLock()
-	defer c.log("UpdateAutoEncryptCert")
 	cert, err := tls.X509KeyPair([]byte(pub), []byte(priv))
 	if err != nil {
 		return fmt.Errorf("Failed to load cert/key pair: %v", err)
 	}
 
-	c.Lock()
-	defer c.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
 	c.autoTLS.cert = &cert
-	c.version++
+	atomic.AddUint64(&c.version, 1)
+	c.log("UpdateAutoTLSCert")
 	return nil
 }
 
-// UpdateAutoTLS sets everything under autoEncrypt. This is being called on the
-// client when it received its cert from AutoEncrypt/AutoConfig endpoints.
+// UpdateAutoTLS receives updates from Auto-Config, only expected to be called on
+// client agents.
 func (c *Configurator) UpdateAutoTLS(manualCAPems, connectCAPems []string, pub, priv string, verifyServerHostname bool) error {
-	// order of defers matters because log acquires a RLock()
-	defer c.log("UpdateAutoEncrypt")
 	cert, err := tls.X509KeyPair([]byte(pub), []byte(priv))
 	if err != nil {
 		return fmt.Errorf("Failed to load cert/key pair: %v", err)
 	}
 
-	c.Lock()
-	defer c.Unlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
 	pool, err := pool(append(c.manual.caPems, append(manualCAPems, connectCAPems...)...))
 	if err != nil {
@@ -319,20 +316,22 @@ func (c *Configurator) UpdateAutoTLS(manualCAPems, connectCAPems []string, pub, 
 	c.autoTLS.cert = &cert
 	c.caPool = pool
 	c.autoTLS.verifyServerHostname = verifyServerHostname
-	c.version++
+	atomic.AddUint64(&c.version, 1)
+	c.log("UpdateAutoTLS")
 	return nil
 }
 
 func (c *Configurator) UpdateAreaPeerDatacenterUseTLS(peerDatacenter string, useTLS bool) {
-	c.Lock()
-	defer c.Unlock()
-	c.version++
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	atomic.AddUint64(&c.version, 1)
+	c.log("UpdateAreaPeerDatacenterUseTLS")
 	c.peerDatacenterUseTLS[peerDatacenter] = useTLS
 }
 
 func (c *Configurator) getAreaForPeerDatacenterUseTLS(peerDatacenter string) bool {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	if v, ok := c.peerDatacenterUseTLS[peerDatacenter]; ok {
 		return v
 	}
@@ -340,8 +339,8 @@ func (c *Configurator) getAreaForPeerDatacenterUseTLS(peerDatacenter string) boo
 }
 
 func (c *Configurator) Base() Config {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	return *c.base
 }
 
@@ -358,11 +357,14 @@ func pool(pems []string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-func (c *Configurator) check(config Config, pool *x509.CertPool, cert *tls.Certificate) error {
+// validateConfig checks that config is valid and does not conflict with the pool
+// or cert.
+func validateConfig(config Config, pool *x509.CertPool, cert *tls.Certificate) error {
 	// Check if a minimum TLS version was set
 	if config.TLSMinVersion != "" {
-		if _, ok := TLSLookup[config.TLSMinVersion]; !ok {
-			return fmt.Errorf("TLSMinVersion: value %s not supported, please specify one of [%s]", config.TLSMinVersion, TLSVersions)
+		if _, ok := tlsLookup[config.TLSMinVersion]; !ok {
+			versions := strings.Join(tlsVersions(), ", ")
+			return fmt.Errorf("TLSMinVersion: value %s not supported, please specify one of [%s]", config.TLSMinVersion, versions)
 		}
 	}
 
@@ -392,19 +394,7 @@ func (c *Configurator) check(config Config, pool *x509.CertPool, cert *tls.Certi
 }
 
 func (c Config) anyVerifyIncoming() bool {
-	return c.baseVerifyIncoming() || c.VerifyIncomingRPC || c.VerifyIncomingHTTPS
-}
-
-func (c Config) verifyIncomingRPC() bool {
-	return c.baseVerifyIncoming() || c.VerifyIncomingRPC
-}
-
-func (c Config) verifyIncomingHTTPS() bool {
-	return c.baseVerifyIncoming() || c.VerifyIncomingHTTPS
-}
-
-func (c *Config) baseVerifyIncoming() bool {
-	return c.VerifyIncoming
+	return c.VerifyIncoming || c.VerifyIncomingRPC || c.VerifyIncomingHTTPS
 }
 
 func loadKeyPair(certFile, keyFile string) (*tls.Certificate, error) {
@@ -472,8 +462,8 @@ func (c *Configurator) commonTLSConfig(verifyIncoming bool) *tls.Config {
 	// this needs to be outside of RLock because it acquires an RLock itself
 	verifyServerHostname := c.VerifyServerHostname()
 
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: !verifyServerHostname,
 	}
@@ -514,10 +504,10 @@ func (c *Configurator) commonTLSConfig(verifyIncoming bool) *tls.Config {
 	tlsConfig.ClientCAs = c.caPool
 	tlsConfig.RootCAs = c.caPool
 
-	// This is possible because TLSLookup also contains "" with golang's
+	// This is possible because tlsLookup also contains "" with golang's
 	// default (tls10). And because the initial check makes sure the
 	// version correctly matches.
-	tlsConfig.MinVersion = TLSLookup[c.base.TLSMinVersion]
+	tlsConfig.MinVersion = tlsLookup[c.base.TLSMinVersion]
 
 	// Set ClientAuth if necessary
 	if verifyIncoming {
@@ -529,8 +519,8 @@ func (c *Configurator) commonTLSConfig(verifyIncoming bool) *tls.Config {
 
 // This function acquires a read lock because it reads from the config.
 func (c *Configurator) Cert() *tls.Certificate {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	cert := c.manual.cert
 	if cert == nil {
 		cert = c.autoTLS.cert
@@ -538,46 +528,35 @@ func (c *Configurator) Cert() *tls.Certificate {
 	return cert
 }
 
-// This function acquires a read lock because it reads from the config.
+// VerifyIncomingRPC returns true if the configuration has enabled either
+// VerifyIncoming, or VerifyIncomingRPC
 func (c *Configurator) VerifyIncomingRPC() bool {
-	c.RLock()
-	defer c.RUnlock()
-	return c.base.verifyIncomingRPC()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.base.VerifyIncoming || c.base.VerifyIncomingRPC
 }
 
 // This function acquires a read lock because it reads from the config.
-func (c *Configurator) outgoingRPCTLSDisabled() bool {
-	c.RLock()
-	defer c.RUnlock()
+func (c *Configurator) outgoingRPCTLSEnabled() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 
-	// if AutoEncrypt enabled, always use TLS
-	if c.base.AutoTLS {
-		return false
-	}
-
-	// if CAs are provided or VerifyOutgoing is set, use TLS
-	if c.base.VerifyOutgoing {
-		return false
-	}
-
-	return true
+	// use TLS if AutoEncrypt or VerifyOutgoing are enabled.
+	return c.base.AutoTLS || c.base.VerifyOutgoing
 }
 
+// MutualTLSCapable returns true if Configurator has a CA and a local TLS
+// certificate configured.
 func (c *Configurator) MutualTLSCapable() bool {
-	return c.mutualTLSCapable()
-}
-
-// This function acquires a read lock because it reads from the config.
-func (c *Configurator) mutualTLSCapable() bool {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	return c.caPool != nil && (c.autoTLS.cert != nil || c.manual.cert != nil)
 }
 
 // This function acquires a read lock because it reads from the config.
 func (c *Configurator) verifyOutgoing() bool {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 
 	// If AutoEncryptTLS is enabled and there is a CA, then verify
 	// outgoing.
@@ -601,36 +580,15 @@ func (c *Configurator) ServerSNI(dc, nodeName string) string {
 
 // This function acquires a read lock because it reads from the config.
 func (c *Configurator) domain() string {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	return c.base.Domain
 }
 
 // This function acquires a read lock because it reads from the config.
-func (c *Configurator) verifyIncomingRPC() bool {
-	c.RLock()
-	defer c.RUnlock()
-	return c.base.verifyIncomingRPC()
-}
-
-// This function acquires a read lock because it reads from the config.
-func (c *Configurator) verifyIncomingHTTPS() bool {
-	c.RLock()
-	defer c.RUnlock()
-	return c.base.verifyIncomingHTTPS()
-}
-
-// This function acquires a read lock because it reads from the config.
-func (c *Configurator) enableAgentTLSForChecks() bool {
-	c.RLock()
-	defer c.RUnlock()
-	return c.base.EnableAgentTLSForChecks
-}
-
-// This function acquires a read lock because it reads from the config.
 func (c *Configurator) serverNameOrNodeName() string {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	if c.base.ServerName != "" {
 		return c.base.ServerName
 	}
@@ -639,8 +597,8 @@ func (c *Configurator) serverNameOrNodeName() string {
 
 // This function acquires a read lock because it reads from the config.
 func (c *Configurator) VerifyServerHostname() bool {
-	c.RLock()
-	defer c.RUnlock()
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	return c.base.VerifyServerHostname || c.autoTLS.verifyServerHostname
 }
 
@@ -663,7 +621,7 @@ func (c *Configurator) IncomingGRPCConfig() *tls.Config {
 // IncomingRPCConfig generates a *tls.Config for incoming RPC connections.
 func (c *Configurator) IncomingRPCConfig() *tls.Config {
 	c.log("IncomingRPCConfig")
-	config := c.commonTLSConfig(c.verifyIncomingRPC())
+	config := c.commonTLSConfig(c.VerifyIncomingRPC())
 	config.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
 		return c.IncomingRPCConfig(), nil
 	}
@@ -703,7 +661,12 @@ func (c *Configurator) IncomingInsecureRPCConfig() *tls.Config {
 // IncomingHTTPSConfig generates a *tls.Config for incoming HTTPS connections.
 func (c *Configurator) IncomingHTTPSConfig() *tls.Config {
 	c.log("IncomingHTTPSConfig")
-	config := c.commonTLSConfig(c.verifyIncomingHTTPS())
+
+	c.lock.RLock()
+	verifyIncoming := c.base.VerifyIncoming || c.base.VerifyIncomingHTTPS
+	c.lock.RUnlock()
+
+	config := c.commonTLSConfig(verifyIncoming)
 	config.NextProtos = []string{"h2", "http/1.1"}
 	config.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
 		return c.IncomingHTTPSConfig(), nil
@@ -711,21 +674,30 @@ func (c *Configurator) IncomingHTTPSConfig() *tls.Config {
 	return config
 }
 
-// IncomingTLSConfig generates a *tls.Config for outgoing TLS connections for
-// checks. This function is separated because there is an extra flag to
+// OutgoingTLSConfigForCheck generates a *tls.Config for outgoing TLS connections
+// for checks. This function is separated because there is an extra flag to
 // consider for checks. EnableAgentTLSForChecks and InsecureSkipVerify has to
 // be checked for checks.
-func (c *Configurator) OutgoingTLSConfigForCheck(skipVerify bool) *tls.Config {
+func (c *Configurator) OutgoingTLSConfigForCheck(skipVerify bool, serverName string) *tls.Config {
 	c.log("OutgoingTLSConfigForCheck")
-	if !c.enableAgentTLSForChecks() {
+
+	c.lock.RLock()
+	useAgentTLS := c.base.EnableAgentTLSForChecks
+	c.lock.RUnlock()
+
+	if !useAgentTLS {
 		return &tls.Config{
 			InsecureSkipVerify: skipVerify,
+			ServerName:         serverName,
 		}
 	}
 
+	if serverName == "" {
+		serverName = c.serverNameOrNodeName()
+	}
 	config := c.commonTLSConfig(false)
 	config.InsecureSkipVerify = skipVerify
-	config.ServerName = c.serverNameOrNodeName()
+	config.ServerName = serverName
 
 	return config
 }
@@ -735,20 +707,20 @@ func (c *Configurator) OutgoingTLSConfigForCheck(skipVerify bool) *tls.Config {
 // otherwise we assume that no TLS should be used.
 func (c *Configurator) OutgoingRPCConfig() *tls.Config {
 	c.log("OutgoingRPCConfig")
-	if c.outgoingRPCTLSDisabled() {
+	if !c.outgoingRPCTLSEnabled() {
 		return nil
 	}
 	return c.commonTLSConfig(false)
 }
 
-// OutgoingALPNRPCConfig generates a *tls.Config for outgoing RPC connections
+// outgoingALPNRPCConfig generates a *tls.Config for outgoing RPC connections
 // directly using TLS with ALPN instead of the older byte-prefixed protocol.
 // If there is a CA or VerifyOutgoing is set, a *tls.Config will be provided,
 // otherwise we assume that no TLS should be used which completely disables the
 // ALPN variation.
-func (c *Configurator) OutgoingALPNRPCConfig() *tls.Config {
-	c.log("OutgoingALPNRPCConfig")
-	if !c.mutualTLSCapable() {
+func (c *Configurator) outgoingALPNRPCConfig() *tls.Config {
+	c.log("outgoingALPNRPCConfig")
+	if !c.MutualTLSCapable() {
 		return nil // ultimately this will hard-fail as TLS is required
 	}
 
@@ -773,50 +745,41 @@ func (c *Configurator) OutgoingRPCWrapper() DCWrapper {
 	}
 }
 
+// UseTLS returns true if the outgoing RPC requests have been explicitly configured
+// to use TLS (via VerifyOutgoing or AutoTLS, and the target DC supports TLS.
 func (c *Configurator) UseTLS(dc string) bool {
-	return !c.outgoingRPCTLSDisabled() && c.getAreaForPeerDatacenterUseTLS(dc)
+	return c.outgoingRPCTLSEnabled() && c.getAreaForPeerDatacenterUseTLS(dc)
 }
 
-// OutgoingALPNRPCWrapper wraps the result of OutgoingALPNRPCConfig in an
+// OutgoingALPNRPCWrapper wraps the result of outgoingALPNRPCConfig in an
 // ALPNWrapper. It configures all of the negotiation plumbing.
 func (c *Configurator) OutgoingALPNRPCWrapper() ALPNWrapper {
 	c.log("OutgoingALPNRPCWrapper")
-	if !c.mutualTLSCapable() {
+	if !c.MutualTLSCapable() {
 		return nil
 	}
 
-	return func(dc, nodeName, alpnProto string, conn net.Conn) (net.Conn, error) {
-		return c.wrapALPNTLSClient(dc, nodeName, alpnProto, conn)
-	}
+	return c.wrapALPNTLSClient
 }
 
-// AutoEncryptCertNotAfter returns NotAfter from the auto_encrypt cert. In case
-// there is no cert, it will return a time in the past.
-func (c *Configurator) AutoEncryptCertNotAfter() time.Time {
-	c.RLock()
-	defer c.RUnlock()
+// AutoEncryptCert returns the TLS certificate received from auto-encrypt.
+func (c *Configurator) AutoEncryptCert() *x509.Certificate {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	tlsCert := c.autoTLS.cert
 	if tlsCert == nil || tlsCert.Certificate == nil {
-		return time.Now().AddDate(0, 0, -1)
+		return nil
 	}
 	cert, err := x509.ParseCertificate(tlsCert.Certificate[0])
 	if err != nil {
-		return time.Now().AddDate(0, 0, -1)
+		return nil
 	}
-	return cert.NotAfter
+	return cert
 }
 
-// AutoEncryptCertExpired returns if the auto_encrypt cert is expired.
-func (c *Configurator) AutoEncryptCertExpired() bool {
-	return c.AutoEncryptCertNotAfter().Before(time.Now())
-}
-
-// This function acquires a read lock because it reads from the config.
 func (c *Configurator) log(name string) {
-	if c.logger != nil {
-		c.RLock()
-		defer c.RUnlock()
-		c.logger.Trace(name, "version", c.version)
+	if c.logger != nil && c.logger.IsTrace() {
+		c.logger.Trace(name, "version", atomic.LoadUint64(&c.version))
 	}
 }
 
@@ -897,7 +860,7 @@ func (c *Configurator) wrapALPNTLSClient(dc, nodeName, alpnProto string, conn ne
 		return nil, fmt.Errorf("cannot dial using ALPN-RPC without a target alpn protocol")
 	}
 
-	config := c.OutgoingALPNRPCConfig()
+	config := c.outgoingALPNRPCConfig()
 	if config == nil {
 		return nil, fmt.Errorf("cannot dial via a mesh gateway when outgoing TLS is disabled")
 	}

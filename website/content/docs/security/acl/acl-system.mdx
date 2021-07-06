@@ -1,7 +1,6 @@
 ---
 layout: docs
 page_title: ACL System
-sidebar_title: ACL System
 description: >-
   Consul provides an optional Access Control List (ACL) system which can be used
   to control access to data and APIs. The ACL system is a Capability-based
@@ -312,7 +311,7 @@ node_prefix "" {
 
 #### ACL Agent Token
 
-The [`acl.tokens.agent`](/docs/agent/options#acl_tokens_agent) is a special token that is used for an agent's internal operations. It isn't used directly for any user-initiated operations like the [`acl.tokens.default`](/docs/agent/options#acl_tokens_default), though if the `acl.tokens.agent_token` isn't configured the `acl.tokens.default` will be used. The ACL agent token is used for the following operations by the agent:
+The [`acl.tokens.agent`](/docs/agent/options#acl_tokens_agent) is a special token that is used for an agent's internal operations. It isn't used directly for any user-initiated operations like the [`acl.tokens.default`](/docs/agent/options#acl_tokens_default), though if the `acl.tokens.agent` isn't configured the `acl.tokens.default` will be used. The ACL agent token is used for the following operations by the agent:
 
 1. Updating the agent's node entry using the [Catalog API](/api/catalog), including updating its node metadata, tagged addresses, and network coordinates
 2. Performing [anti-entropy](/docs/internals/anti-entropy) syncing, in particular reading the node metadata and services registered with the catalog

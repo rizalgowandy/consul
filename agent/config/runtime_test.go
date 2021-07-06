@@ -2582,10 +2582,20 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 											}
 										]
 									},
+									"mode": "transparent",
+									"transparent_proxy": {
+										"outbound_listener_port": 10101,
+										"dialed_directly": true
+									},
 									"upstreams": [
 										{
 											"destination_name": "db",
 											"local_bind_port": 7000
+										},
+										{
+											"destination_name": "db2",
+											"local_bind_socket_path": "/tmp/socketpath",
+											"local_bind_socket_mode": "0644"
 										}
 									]
 								}
@@ -2617,12 +2627,22 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 											protocol = "http"
 										}
 									]
-								},
+								}
+								mode = "transparent"
+								transparent_proxy = {
+									outbound_listener_port = 10101
+									dialed_directly = true
+								}
 								upstreams = [
 									{
 										destination_name = "db"
 										local_bind_port = 7000
 									},
+									{
+									    destination_name = "db2",
+									    local_bind_socket_path = "/tmp/socketpath",
+									    local_bind_socket_mode = "0644"
+									}
 								]
 							}
 						}
@@ -2657,11 +2677,22 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 										},
 									},
 								},
+								Mode: structs.ProxyModeTransparent,
+								TransparentProxy: structs.TransparentProxyConfig{
+									OutboundListenerPort: 10101,
+									DialedDirectly:       true,
+								},
 								Upstreams: structs.Upstreams{
 									structs.Upstream{
 										DestinationType: "service",
 										DestinationName: "db",
 										LocalBindPort:   7000,
+									},
+									structs.Upstream{
+										DestinationType:     "service",
+										DestinationName:     "db2",
+										LocalBindSocketPath: "/tmp/socketpath",
+										LocalBindSocketMode: "0644",
 									},
 								},
 							},
@@ -2711,6 +2742,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 											}
 										]
 									},
+									"mode": "transparent",
+									"transparent_proxy": {
+										"outbound_listener_port": 10101,
+										"dialed_directly": true
+									},
 									"upstreams": [
 										{
 											"destination_name": "db",
@@ -2746,7 +2782,12 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 											protocol = "http"
 										}
 									]
-								},
+								}
+								mode = "transparent"
+								transparent_proxy = {
+									outbound_listener_port = 10101
+									dialed_directly = true
+								}
 								upstreams = [
 									{
 										destination_name = "db"
@@ -2785,6 +2826,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 											Protocol:      "http",
 										},
 									},
+								},
+								Mode: structs.ProxyModeTransparent,
+								TransparentProxy: structs.TransparentProxyConfig{
+									OutboundListenerPort: 10101,
+									DialedDirectly:       true,
 								},
 								Upstreams: structs.Upstreams{
 									structs.Upstream{
@@ -3428,6 +3474,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 							},
 							"mesh_gateway": {
 								"mode": "remote"
+							},
+							"mode": "transparent",
+							"transparent_proxy": {
+								"outbound_listener_port": 10101,
+								"dialed_directly": true
 							}
 						}
 					]
@@ -3447,6 +3498,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 						mesh_gateway {
 							mode = "remote"
 						}
+						mode = "transparent"
+						transparent_proxy = {
+							outbound_listener_port = 10101
+							dialed_directly = true
+						}
 					}
 				}`},
 		expected: func(rt *RuntimeConfig) {
@@ -3464,6 +3520,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 					},
 					MeshGateway: structs.MeshGatewayConfig{
 						Mode: structs.MeshGatewayModeRemote,
+					},
+					Mode: structs.ProxyModeTransparent,
+					TransparentProxy: structs.TransparentProxyConfig{
+						OutboundListenerPort: 10101,
+						DialedDirectly:       true,
 					},
 				},
 			}
@@ -3486,6 +3547,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 							},
 							"MeshGateway": {
 								"Mode": "remote"
+							},
+							"Mode": "transparent",
+							"TransparentProxy": {
+								"OutboundListenerPort": 10101,
+								"DialedDirectly": true
 							}
 						}
 					]
@@ -3505,6 +3571,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 						MeshGateway {
 							Mode = "remote"
 						}
+						Mode = "transparent"
+						TransparentProxy = {
+							OutboundListenerPort = 10101
+							DialedDirectly = true
+						}
 					}
 				}`},
 		expected: func(rt *RuntimeConfig) {
@@ -3522,6 +3593,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 					},
 					MeshGateway: structs.MeshGatewayConfig{
 						Mode: structs.MeshGatewayModeRemote,
+					},
+					Mode: structs.ProxyModeTransparent,
+					TransparentProxy: structs.TransparentProxyConfig{
+						OutboundListenerPort: 10101,
+						DialedDirectly:       true,
 					},
 				},
 			}
@@ -3544,6 +3620,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 							"external_sni": "abc-123",
 							"mesh_gateway": {
 								"mode": "remote"
+							},
+							"mode": "transparent",
+							"transparent_proxy": {
+								"outbound_listener_port": 10101,
+								"dialed_directly": true
 							}
 						}
 					]
@@ -3563,6 +3644,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 						mesh_gateway {
 							mode = "remote"
 						}
+						mode = "transparent"
+						transparent_proxy = {
+							outbound_listener_port = 10101
+							dialed_directly = true
+						}
 					}
 				}`},
 		expected: func(rt *RuntimeConfig) {
@@ -3580,6 +3666,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 					ExternalSNI:    "abc-123",
 					MeshGateway: structs.MeshGatewayConfig{
 						Mode: structs.MeshGatewayModeRemote,
+					},
+					Mode: structs.ProxyModeTransparent,
+					TransparentProxy: structs.TransparentProxyConfig{
+						OutboundListenerPort: 10101,
+						DialedDirectly:       true,
 					},
 				},
 			}
@@ -3602,6 +3693,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 							"ExternalSNI": "abc-123",
 							"MeshGateway": {
 								"Mode": "remote"
+							},
+							"Mode": "transparent",
+							"TransparentProxy": {
+								"OutboundListenerPort": 10101,
+								"DialedDirectly": true
 							}
 						}
 					]
@@ -3621,6 +3717,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 						MeshGateway {
 							Mode = "remote"
 						}
+						Mode = "transparent"
+						TransparentProxy = {
+							OutboundListenerPort = 10101
+							DialedDirectly = true
+						}
 					}
 				}`},
 		expected: func(rt *RuntimeConfig) {
@@ -3638,6 +3739,11 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 					ExternalSNI:    "abc-123",
 					MeshGateway: structs.MeshGatewayConfig{
 						Mode: structs.MeshGatewayModeRemote,
+					},
+					Mode: structs.ProxyModeTransparent,
+					TransparentProxy: structs.TransparentProxyConfig{
+						OutboundListenerPort: 10101,
+						DialedDirectly:       true,
 					},
 				},
 			}
@@ -4072,6 +4178,108 @@ func TestLoad_IntegrationWithFlags(t *testing.T) {
 							Precedence:     6,
 							EnterpriseMeta: *defaultEntMeta,
 						},
+					},
+				},
+			}
+		},
+	})
+	run(t, testCase{
+		desc: "ConfigEntry bootstrap cluster (snake-case)",
+		args: []string{`-data-dir=` + dataDir},
+		json: []string{`{
+				"config_entries": {
+					"bootstrap": [
+						{
+							"kind": "mesh",
+							"meta" : {
+								"foo": "bar",
+								"gir": "zim"
+							},
+							"transparent_proxy": {
+								"mesh_destinations_only": true
+							}
+						}
+					]
+				}
+			}`,
+		},
+		hcl: []string{`
+				config_entries {
+				  bootstrap {
+					kind = "mesh"
+					meta {
+						"foo" = "bar"
+						"gir" = "zim"
+					}
+					transparent_proxy {
+						mesh_destinations_only = true
+					}
+				  }
+				}
+			`,
+		},
+		expected: func(rt *RuntimeConfig) {
+			rt.DataDir = dataDir
+			rt.ConfigEntryBootstrap = []structs.ConfigEntry{
+				&structs.MeshConfigEntry{
+					Meta: map[string]string{
+						"foo": "bar",
+						"gir": "zim",
+					},
+					EnterpriseMeta: *defaultEntMeta,
+					TransparentProxy: structs.TransparentProxyMeshConfig{
+						MeshDestinationsOnly: true,
+					},
+				},
+			}
+		},
+	})
+	run(t, testCase{
+		desc: "ConfigEntry bootstrap cluster (camel-case)",
+		args: []string{`-data-dir=` + dataDir},
+		json: []string{`{
+				"config_entries": {
+					"bootstrap": [
+						{
+							"Kind": "mesh",
+							"Meta" : {
+								"foo": "bar",
+								"gir": "zim"
+							},
+							"TransparentProxy": {
+								"MeshDestinationsOnly": true
+							}
+						}
+					]
+				}
+			}`,
+		},
+		hcl: []string{`
+				config_entries {
+				  bootstrap {
+					Kind = "mesh"
+					Meta {
+						"foo" = "bar"
+						"gir" = "zim"
+					}
+					TransparentProxy {
+						MeshDestinationsOnly = true
+					}
+				  }
+				}
+			`,
+		},
+		expected: func(rt *RuntimeConfig) {
+			rt.DataDir = dataDir
+			rt.ConfigEntryBootstrap = []structs.ConfigEntry{
+				&structs.MeshConfigEntry{
+					Meta: map[string]string{
+						"foo": "bar",
+						"gir": "zim",
+					},
+					EnterpriseMeta: *defaultEntMeta,
+					TransparentProxy: structs.TransparentProxyMeshConfig{
+						MeshDestinationsOnly: true,
 					},
 				},
 			}
@@ -5077,10 +5285,12 @@ func TestLoad_FullConfig(t *testing.T) {
 				Method:                         "aldrIQ4l",
 				Body:                           "wSjTy7dg",
 				TCP:                            "RJQND605",
+				H2PING:                         "9N1cSb5B",
 				Interval:                       22164 * time.Second,
 				OutputMaxSize:                  checks.DefaultBufSize,
 				DockerContainerID:              "ipgdFtjd",
 				Shell:                          "qAeOYy0M",
+				TLSServerName:                  "bdeb5f6a",
 				TLSSkipVerify:                  true,
 				Timeout:                        1813 * time.Second,
 				TTL:                            21743 * time.Second,
@@ -5103,9 +5313,11 @@ func TestLoad_FullConfig(t *testing.T) {
 				Body:                           "0jkKgGUC",
 				OutputMaxSize:                  checks.DefaultBufSize,
 				TCP:                            "4jG5casb",
+				H2PING:                         "HCHU7gEb",
 				Interval:                       28767 * time.Second,
 				DockerContainerID:              "THW6u7rL",
 				Shell:                          "C1Zt3Zwh",
+				TLSServerName:                  "6adc3bfb",
 				TLSSkipVerify:                  true,
 				Timeout:                        18506 * time.Second,
 				TTL:                            31006 * time.Second,
@@ -5128,9 +5340,11 @@ func TestLoad_FullConfig(t *testing.T) {
 				Body:                           "5PBQd2OT",
 				OutputMaxSize:                  checks.DefaultBufSize,
 				TCP:                            "JY6fTTcw",
+				H2PING:                         "rQ8eyCSF",
 				Interval:                       18714 * time.Second,
 				DockerContainerID:              "qF66POS9",
 				Shell:                          "sOnDy228",
+				TLSServerName:                  "7BdnzBYk",
 				TLSSkipVerify:                  true,
 				Timeout:                        5954 * time.Second,
 				TTL:                            30044 * time.Second,
@@ -5333,9 +5547,11 @@ func TestLoad_FullConfig(t *testing.T) {
 						Body:                           "WeikigLh",
 						OutputMaxSize:                  checks.DefaultBufSize,
 						TCP:                            "ICbxkpSF",
+						H2PING:                         "7s7BbMyb",
 						Interval:                       24392 * time.Second,
 						DockerContainerID:              "ZKXr68Yb",
 						Shell:                          "CEfzx0Fo",
+						TLSServerName:                  "4f191d4F",
 						TLSSkipVerify:                  true,
 						Timeout:                        38333 * time.Second,
 						TTL:                            57201 * time.Second,
@@ -5383,9 +5599,11 @@ func TestLoad_FullConfig(t *testing.T) {
 						Body:                           "7CRjCJyz",
 						OutputMaxSize:                  checks.DefaultBufSize,
 						TCP:                            "MN3oA9D2",
+						H2PING:                         "OV6Q2XEg",
 						Interval:                       32718 * time.Second,
 						DockerContainerID:              "cU15LMet",
 						Shell:                          "nEz9qz2l",
+						TLSServerName:                  "f43ouY7a",
 						TLSSkipVerify:                  true,
 						Timeout:                        34738 * time.Second,
 						TTL:                            22773 * time.Second,
@@ -5406,9 +5624,11 @@ func TestLoad_FullConfig(t *testing.T) {
 						Body:                           "4I8ucZgZ",
 						OutputMaxSize:                  checks.DefaultBufSize,
 						TCP:                            "2exjZIGE",
+						H2PING:                         "jTDuR1DC",
 						Interval:                       5656 * time.Second,
 						DockerContainerID:              "5tDBWpfA",
 						Shell:                          "rlTpLM8s",
+						TLSServerName:                  "sOv5WTtp",
 						TLSSkipVerify:                  true,
 						Timeout:                        4868 * time.Second,
 						TTL:                            11222 * time.Second,
@@ -5446,6 +5666,13 @@ func TestLoad_FullConfig(t *testing.T) {
 							LocalBindPort:        11884,
 							LocalBindAddress:     "127.24.88.0",
 						},
+						{
+							DestinationType:      "prepared_query",
+							DestinationNamespace: "9nakw0td",
+							DestinationName:      "placeholder",
+							LocalBindSocketPath:  "/foo/bar/upstream",
+							LocalBindSocketMode:  "0600",
+						},
 					},
 					Expose: structs.ExposeConfig{
 						Checks: true,
@@ -5457,6 +5684,11 @@ func TestLoad_FullConfig(t *testing.T) {
 								Protocol:      "http",
 							},
 						},
+					},
+					Mode: structs.ProxyModeTransparent,
+					TransparentProxy: structs.TransparentProxyConfig{
+						OutboundListenerPort: 10101,
+						DialedDirectly:       true,
 					},
 				},
 				Weights: &structs.Weights{
@@ -5522,9 +5754,11 @@ func TestLoad_FullConfig(t *testing.T) {
 						Body:                           "OwGjTFQi",
 						OutputMaxSize:                  checks.DefaultBufSize,
 						TCP:                            "bNnNfx2A",
+						H2PING:                         "qC1pidiW",
 						Interval:                       22224 * time.Second,
 						DockerContainerID:              "ipgdFtjd",
 						Shell:                          "omVZq7Sz",
+						TLSServerName:                  "axw5QPL5",
 						TLSSkipVerify:                  true,
 						Timeout:                        18913 * time.Second,
 						TTL:                            44743 * time.Second,
@@ -5545,9 +5779,11 @@ func TestLoad_FullConfig(t *testing.T) {
 						Body:                           "lUVLGYU7",
 						OutputMaxSize:                  checks.DefaultBufSize,
 						TCP:                            "FfvCwlqH",
+						H2PING:                         "spI3muI3",
 						Interval:                       12356 * time.Second,
 						DockerContainerID:              "HBndBU6R",
 						Shell:                          "hVI33JjA",
+						TLSServerName:                  "7uwWOnUS",
 						TLSSkipVerify:                  true,
 						Timeout:                        38282 * time.Second,
 						TTL:                            1181 * time.Second,
@@ -5568,9 +5804,11 @@ func TestLoad_FullConfig(t *testing.T) {
 						Body:                           "wVVL2V6f",
 						OutputMaxSize:                  checks.DefaultBufSize,
 						TCP:                            "fjiLFqVd",
+						H2PING:                         "5NbNWhan",
 						Interval:                       23926 * time.Second,
 						DockerContainerID:              "dO5TtRHk",
 						Shell:                          "e6q2ttES",
+						TLSServerName:                  "ECSHk8WF",
 						TLSSkipVerify:                  true,
 						Timeout:                        38483 * time.Second,
 						TTL:                            10943 * time.Second,

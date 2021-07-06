@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/hashicorp/consul/agent/structs"
 	"github.com/mitchellh/copystructure"
+
+	"github.com/hashicorp/consul/agent/structs"
 )
 
 // TODO(ingress): Can we think of a better for this bag of data?
@@ -17,6 +18,13 @@ type ConfigSnapshotUpstreams struct {
 	// CompiledDiscoveryChain's, and is used to determine what services could be
 	// targeted by this upstream. We then instantiate watches for those targets.
 	DiscoveryChain map[string]*structs.CompiledDiscoveryChain
+
+	// WatchedDiscoveryChains is a map of upstream.Identifier() -> CancelFunc's
+	// in order to cancel any watches when the proxy's configuration is
+	// changed. Ingress gateways and transparent proxies need this because
+	// discovery chain watches are added and removed through the lifecycle
+	// of a single proxycfg state instance.
+	WatchedDiscoveryChains map[string]context.CancelFunc
 
 	// WatchedUpstreams is a map of upstream.Identifier() -> (map of TargetID ->
 	// CancelFunc's) in order to cancel any watches when the configuration is
@@ -36,6 +44,21 @@ type ConfigSnapshotUpstreams struct {
 	// TargetID -> CheckServiceNodes) and is used to determine the backing
 	// endpoints of a mesh gateway.
 	WatchedGatewayEndpoints map[string]map[string]structs.CheckServiceNodes
+
+	// UpstreamConfig is a map to an upstream's configuration.
+	UpstreamConfig map[string]*structs.Upstream
+
+	// PassthroughEndpoints is a map of: ServiceName -> ServicePassthroughAddrs.
+	PassthroughUpstreams map[string]ServicePassthroughAddrs
+}
+
+// ServicePassthroughAddrs contains the LAN addrs
+type ServicePassthroughAddrs struct {
+	// SNI is the Service SNI of the upstream.
+	SNI string
+
+	// Addrs is a set of the best LAN addresses for the instances of the upstream.
+	Addrs map[string]struct{}
 }
 
 type configSnapshotConnectProxy struct {
@@ -49,6 +72,9 @@ type configSnapshotConnectProxy struct {
 	// intentions.
 	Intentions    structs.Intentions
 	IntentionsSet bool
+
+	MeshConfig    *structs.MeshConfigEntry
+	MeshConfigSet bool
 }
 
 func (c *configSnapshotConnectProxy) IsEmpty() bool {
@@ -58,12 +84,16 @@ func (c *configSnapshotConnectProxy) IsEmpty() bool {
 	return c.Leaf == nil &&
 		!c.IntentionsSet &&
 		len(c.DiscoveryChain) == 0 &&
+		len(c.WatchedDiscoveryChains) == 0 &&
 		len(c.WatchedUpstreams) == 0 &&
 		len(c.WatchedUpstreamEndpoints) == 0 &&
 		len(c.WatchedGateways) == 0 &&
 		len(c.WatchedGatewayEndpoints) == 0 &&
 		len(c.WatchedServiceChecks) == 0 &&
-		len(c.PreparedQueryEndpoints) == 0
+		len(c.PreparedQueryEndpoints) == 0 &&
+		len(c.UpstreamConfig) == 0 &&
+		len(c.PassthroughUpstreams) == 0 &&
+		!c.MeshConfigSet
 }
 
 type configSnapshotTerminatingGateway struct {
@@ -287,12 +317,6 @@ type configSnapshotIngressGateway struct {
 	// to. This is constructed from the ingress-gateway config entry, and uses
 	// the GatewayServices RPC to retrieve them.
 	Upstreams map[IngressListenerKey]structs.Upstreams
-
-	// WatchedDiscoveryChains is a map of upstream.Identifier() -> CancelFunc's
-	// in order to cancel any watches when the ingress gateway configuration is
-	// changed. Ingress gateways need this because discovery chain watches are
-	// added and removed through the lifecycle of single proxycfg.state instance.
-	WatchedDiscoveryChains map[string]context.CancelFunc
 }
 
 func (c *configSnapshotIngressGateway) IsEmpty() bool {
@@ -301,7 +325,6 @@ func (c *configSnapshotIngressGateway) IsEmpty() bool {
 	}
 	return len(c.Upstreams) == 0 &&
 		len(c.DiscoveryChain) == 0 &&
-		len(c.WatchedDiscoveryChains) == 0 &&
 		len(c.WatchedUpstreams) == 0 &&
 		len(c.WatchedUpstreamEndpoints) == 0
 }
@@ -350,6 +373,9 @@ type ConfigSnapshot struct {
 func (s *ConfigSnapshot) Valid() bool {
 	switch s.Kind {
 	case structs.ServiceKindConnectProxy:
+		if s.Proxy.Mode == structs.ProxyModeTransparent && !s.ConnectProxy.MeshConfigSet {
+			return false
+		}
 		return s.Roots != nil &&
 			s.ConnectProxy.Leaf != nil &&
 			s.ConnectProxy.IntentionsSet

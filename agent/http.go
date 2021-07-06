@@ -238,18 +238,16 @@ func (s *HTTPHandlers) handler(enableDebug bool) http.Handler {
 			var token string
 			s.parseToken(req, &token)
 
-			rule, err := s.agent.resolveToken(token)
-			if err != nil {
-				resp.WriteHeader(http.StatusForbidden)
+			// If enableDebug is not set, and ACLs are disabled, write
+			// an unauthorized response
+			if !enableDebug && s.checkACLDisabled(resp, req) {
 				return
 			}
 
-			// If enableDebug is not set, and ACLs are disabled, write
-			// an unauthorized response
-			if !enableDebug {
-				if s.checkACLDisabled(resp, req) {
-					return
-				}
+			rule, err := s.agent.delegate.ResolveTokenAndDefaultMeta(token, nil, nil)
+			if err != nil {
+				resp.WriteHeader(http.StatusForbidden)
+				return
 			}
 
 			// If the token provided does not have the necessary permissions,
@@ -288,7 +286,7 @@ func (s *HTTPHandlers) handler(enableDebug bool) http.Handler {
 		uiHandler := uiserver.NewHandler(
 			s.agent.config,
 			s.agent.logger.Named(logging.HTTP),
-			s.uiTemplateDataTransform(),
+			s.uiTemplateDataTransform,
 		)
 		s.configReloaders = append(s.configReloaders, uiHandler.ReloadConfig)
 
@@ -298,10 +296,7 @@ func (s *HTTPHandlers) handler(enableDebug bool) http.Handler {
 			uiHandler,
 			s.agent.config.HTTPResponseHeaders,
 		)
-		mux.Handle(
-			"/robots.txt",
-			uiHandlerWithHeaders,
-		)
+		mux.Handle("/robots.txt", uiHandlerWithHeaders)
 		mux.Handle(
 			s.agent.config.UIConfig.ContentPath,
 			http.StripPrefix(
@@ -728,6 +723,13 @@ func setMeta(resp http.ResponseWriter, m structs.QueryMetaCompat) {
 	setLastContact(resp, m.GetLastContact())
 	setKnownLeader(resp, m.GetKnownLeader())
 	setConsistency(resp, m.GetConsistencyLevel())
+	setQueryBackend(resp, m.GetBackend())
+}
+
+func setQueryBackend(resp http.ResponseWriter, backend structs.QueryBackend) {
+	if b := backend.String(); b != "" {
+		resp.Header().Set("X-Consul-Query-Backend", b)
+	}
 }
 
 // setCacheMeta sets http response headers to indicate cache status.

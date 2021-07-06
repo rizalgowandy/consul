@@ -6,6 +6,11 @@
 
 module.exports = [
   {
+    source: '/trial',
+    destination: 'https://www.hashicorp.com/products/consul/trial',
+    permanent: true,
+  },
+  {
     source: '/discovery',
     destination: '/use-cases/service-discovery-and-health-checking',
     permanent: true,
@@ -74,6 +79,11 @@ module.exports = [
   {
     source: '/docs/connect/proxies/sidecar-service',
     destination: '/docs/connect/registration/sidecar-service',
+    permanent: true,
+  },
+  {
+    source: '/docs/enterprise/license',
+    destination: '/docs/enterprise/license/overview',
     permanent: true,
   },
   {
@@ -245,11 +255,6 @@ module.exports = [
   },
   { source: '/intro', destination: '/docs/intro', permanent: true },
   { source: '/intro/vs', destination: '/docs/intro/vs', permanent: true },
-  {
-    source: '/intro/vs/zookeeper',
-    destination: '/docs/intro/vs/zookeeper',
-    permanent: true,
-  },
   {
     source: '/intro/vs/chef-puppet',
     destination: '/docs/intro/vs/chef-puppet',
@@ -1175,6 +1180,16 @@ module.exports = [
   {
     source: '/docs/nia/installation/configuration',
     destination: '/docs/nia/configuration',
+    permanent: true,
+  },
+  {
+    source: '/docs/nia/api/api-overview',
+    destination: '/docs/nia/api',
+    permanent: true,
+  },
+  {
+    source: '/docs/nia/cli/cli-overview',
+    destination: '/docs/nia/cli',
     permanent: true,
   },
   {

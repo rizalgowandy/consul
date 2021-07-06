@@ -29,15 +29,16 @@ var (
 )
 
 // startConnectLeader starts multi-dc connect leader routines.
-func (s *Server) startConnectLeader() error {
+func (s *Server) startConnectLeader(ctx context.Context) error {
 	if !s.config.ConnectEnabled {
 		return nil
 	}
 
-	s.caManager.Start()
-	s.leaderRoutineManager.Start(caRootPruningRoutineName, s.runCARootPruning)
+	s.caManager.Start(ctx)
+	s.leaderRoutineManager.Start(ctx, caRootPruningRoutineName, s.runCARootPruning)
+	s.leaderRoutineManager.Start(ctx, caRootMetricRoutineName, rootCAExpiryMonitor(s).monitor)
 
-	return s.startIntentionConfigEntryMigration()
+	return s.startIntentionConfigEntryMigration(ctx)
 }
 
 // stopConnectLeader stops connect specific leader functions.
@@ -135,15 +136,8 @@ func (s *Server) pruneCARoots() error {
 	args.Op = structs.CAOpSetRoots
 	args.Index = idx
 	args.Roots = newRoots
-	resp, err := s.raftApply(structs.ConnectCARequestType, args)
-	if err != nil {
-		return err
-	}
-	if respErr, ok := resp.(error); ok {
-		return respErr
-	}
-
-	return nil
+	_, err = s.raftApply(structs.ConnectCARequestType, args)
+	return err
 }
 
 // retryLoopBackoff loops a given function indefinitely, backing off exponentially

@@ -10,12 +10,12 @@ import (
 	"github.com/hashicorp/consul/agent/structs"
 )
 
-func aclPolicyInsert(tx *txn, policy *structs.ACLPolicy) error {
-	if err := tx.Insert("acl-policies", policy); err != nil {
+func aclPolicyInsert(tx WriteTxn, policy *structs.ACLPolicy) error {
+	if err := tx.Insert(tableACLPolicies, policy); err != nil {
 		return fmt.Errorf("failed inserting acl policy: %v", err)
 	}
 
-	if err := indexUpdateMaxTxn(tx, policy.ModifyIndex, "acl-policies"); err != nil {
+	if err := indexUpdateMaxTxn(tx, policy.ModifyIndex, tableACLPolicies); err != nil {
 		return fmt.Errorf("failed updating acl policies index: %v", err)
 	}
 
@@ -23,35 +23,27 @@ func aclPolicyInsert(tx *txn, policy *structs.ACLPolicy) error {
 }
 
 func aclPolicyGetByID(tx ReadTxn, id string, _ *structs.EnterpriseMeta) (<-chan struct{}, interface{}, error) {
-	return tx.FirstWatch("acl-policies", "id", id)
+	return tx.FirstWatch(tableACLPolicies, indexID, id)
 }
 
-func aclPolicyGetByName(tx ReadTxn, name string, _ *structs.EnterpriseMeta) (<-chan struct{}, interface{}, error) {
-	return tx.FirstWatch("acl-policies", "name", name)
-}
-
-func aclPolicyList(tx ReadTxn, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
-	return tx.Get("acl-policies", "id")
-}
-
-func aclPolicyDeleteWithPolicy(tx *txn, policy *structs.ACLPolicy, idx uint64) error {
+func aclPolicyDeleteWithPolicy(tx WriteTxn, policy *structs.ACLPolicy, idx uint64) error {
 	// remove the policy
-	if err := tx.Delete("acl-policies", policy); err != nil {
+	if err := tx.Delete(tableACLPolicies, policy); err != nil {
 		return fmt.Errorf("failed deleting acl policy: %v", err)
 	}
 
 	// update the overall acl-policies index
-	if err := indexUpdateMaxTxn(tx, idx, "acl-policies"); err != nil {
+	if err := indexUpdateMaxTxn(tx, idx, tableACLPolicies); err != nil {
 		return fmt.Errorf("failed updating acl policies index: %v", err)
 	}
 	return nil
 }
 
 func aclPolicyMaxIndex(tx ReadTxn, _ *structs.ACLPolicy, _ *structs.EnterpriseMeta) uint64 {
-	return maxIndexTxn(tx, "acl-policies")
+	return maxIndexTxn(tx, tableACLPolicies)
 }
 
-func aclPolicyUpsertValidateEnterprise(*txn, *structs.ACLPolicy, *structs.ACLPolicy) error {
+func aclPolicyUpsertValidateEnterprise(ReadTxn, *structs.ACLPolicy, *structs.ACLPolicy) error {
 	return nil
 }
 
@@ -63,7 +55,7 @@ func (s *Store) ACLPolicyUpsertValidateEnterprise(*structs.ACLPolicy, *structs.A
 /////                        ACL Token Functions                          /////
 ///////////////////////////////////////////////////////////////////////////////
 
-func aclTokenInsert(tx *txn, token *structs.ACLToken) error {
+func aclTokenInsert(tx WriteTxn, token *structs.ACLToken) error {
 	// insert the token into memdb
 	if err := tx.Insert("acl-tokens", token); err != nil {
 		return fmt.Errorf("failed inserting acl token: %v", err)
@@ -105,7 +97,7 @@ func aclTokenListByAuthMethod(tx ReadTxn, authMethod string, _, _ *structs.Enter
 	return tx.Get("acl-tokens", "authmethod", authMethod)
 }
 
-func aclTokenDeleteWithToken(tx *txn, token *structs.ACLToken, idx uint64) error {
+func aclTokenDeleteWithToken(tx WriteTxn, token *structs.ACLToken, idx uint64) error {
 	// remove the token
 	if err := tx.Delete("acl-tokens", token); err != nil {
 		return fmt.Errorf("failed deleting acl token: %v", err)
@@ -122,7 +114,7 @@ func aclTokenMaxIndex(tx ReadTxn, _ *structs.ACLToken, entMeta *structs.Enterpri
 	return maxIndexTxn(tx, "acl-tokens")
 }
 
-func aclTokenUpsertValidateEnterprise(tx *txn, token *structs.ACLToken, existing *structs.ACLToken) error {
+func aclTokenUpsertValidateEnterprise(tx WriteTxn, token *structs.ACLToken, existing *structs.ACLToken) error {
 	return nil
 }
 
@@ -134,53 +126,41 @@ func (s *Store) ACLTokenUpsertValidateEnterprise(token *structs.ACLToken, existi
 /////                         ACL Role Functions                          /////
 ///////////////////////////////////////////////////////////////////////////////
 
-func aclRoleInsert(tx *txn, role *structs.ACLRole) error {
+func aclRoleInsert(tx WriteTxn, role *structs.ACLRole) error {
 	// insert the role into memdb
-	if err := tx.Insert("acl-roles", role); err != nil {
+	if err := tx.Insert(tableACLRoles, role); err != nil {
 		return fmt.Errorf("failed inserting acl role: %v", err)
 	}
 
 	// update the overall acl-roles index
-	if err := indexUpdateMaxTxn(tx, role.ModifyIndex, "acl-roles"); err != nil {
+	if err := indexUpdateMaxTxn(tx, role.ModifyIndex, tableACLRoles); err != nil {
 		return fmt.Errorf("failed updating acl roles index: %v", err)
 	}
 	return nil
 }
 
 func aclRoleGetByID(tx ReadTxn, id string, _ *structs.EnterpriseMeta) (<-chan struct{}, interface{}, error) {
-	return tx.FirstWatch("acl-roles", "id", id)
+	return tx.FirstWatch(tableACLRoles, indexID, id)
 }
 
-func aclRoleGetByName(tx ReadTxn, name string, _ *structs.EnterpriseMeta) (<-chan struct{}, interface{}, error) {
-	return tx.FirstWatch("acl-roles", "name", name)
-}
-
-func aclRoleList(tx ReadTxn, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
-	return tx.Get("acl-roles", "id")
-}
-
-func aclRoleListByPolicy(tx ReadTxn, policy string, _ *structs.EnterpriseMeta) (memdb.ResultIterator, error) {
-	return tx.Get("acl-roles", "policies", policy)
-}
-
-func aclRoleDeleteWithRole(tx *txn, role *structs.ACLRole, idx uint64) error {
+func aclRoleDeleteWithRole(tx WriteTxn, role *structs.ACLRole, idx uint64) error {
 	// remove the role
-	if err := tx.Delete("acl-roles", role); err != nil {
+	if err := tx.Delete(tableACLRoles, role); err != nil {
 		return fmt.Errorf("failed deleting acl role: %v", err)
 	}
 
 	// update the overall acl-roles index
-	if err := indexUpdateMaxTxn(tx, idx, "acl-roles"); err != nil {
+	if err := indexUpdateMaxTxn(tx, idx, tableACLRoles); err != nil {
 		return fmt.Errorf("failed updating acl policies index: %v", err)
 	}
 	return nil
 }
 
 func aclRoleMaxIndex(tx ReadTxn, _ *structs.ACLRole, _ *structs.EnterpriseMeta) uint64 {
-	return maxIndexTxn(tx, "acl-roles")
+	return maxIndexTxn(tx, tableACLRoles)
 }
 
-func aclRoleUpsertValidateEnterprise(tx *txn, role *structs.ACLRole, existing *structs.ACLRole) error {
+func aclRoleUpsertValidateEnterprise(tx WriteTxn, role *structs.ACLRole, existing *structs.ACLRole) error {
 	return nil
 }
 
@@ -192,7 +172,7 @@ func (s *Store) ACLRoleUpsertValidateEnterprise(role *structs.ACLRole, existing 
 /////                     ACL Binding Rule Functions                      /////
 ///////////////////////////////////////////////////////////////////////////////
 
-func aclBindingRuleInsert(tx *txn, rule *structs.ACLBindingRule) error {
+func aclBindingRuleInsert(tx WriteTxn, rule *structs.ACLBindingRule) error {
 	// insert the role into memdb
 	if err := tx.Insert("acl-binding-rules", rule); err != nil {
 		return fmt.Errorf("failed inserting acl role: %v", err)
@@ -218,7 +198,7 @@ func aclBindingRuleListByAuthMethod(tx ReadTxn, method string, _ *structs.Enterp
 	return tx.Get("acl-binding-rules", "authmethod", method)
 }
 
-func aclBindingRuleDeleteWithRule(tx *txn, rule *structs.ACLBindingRule, idx uint64) error {
+func aclBindingRuleDeleteWithRule(tx WriteTxn, rule *structs.ACLBindingRule, idx uint64) error {
 	// remove the rule
 	if err := tx.Delete("acl-binding-rules", rule); err != nil {
 		return fmt.Errorf("failed deleting acl binding rule: %v", err)
@@ -235,7 +215,7 @@ func aclBindingRuleMaxIndex(tx ReadTxn, _ *structs.ACLBindingRule, entMeta *stru
 	return maxIndexTxn(tx, "acl-binding-rules")
 }
 
-func aclBindingRuleUpsertValidateEnterprise(tx *txn, rule *structs.ACLBindingRule, existing *structs.ACLBindingRule) error {
+func aclBindingRuleUpsertValidateEnterprise(tx ReadTxn, rule *structs.ACLBindingRule, existing *structs.ACLBindingRule) error {
 	return nil
 }
 
@@ -247,7 +227,7 @@ func (s *Store) ACLBindingRuleUpsertValidateEnterprise(rule *structs.ACLBindingR
 /////                     ACL Auth Method Functions                       /////
 ///////////////////////////////////////////////////////////////////////////////
 
-func aclAuthMethodInsert(tx *txn, method *structs.ACLAuthMethod) error {
+func aclAuthMethodInsert(tx WriteTxn, method *structs.ACLAuthMethod) error {
 	// insert the role into memdb
 	if err := tx.Insert("acl-auth-methods", method); err != nil {
 		return fmt.Errorf("failed inserting acl role: %v", err)
@@ -269,7 +249,7 @@ func aclAuthMethodList(tx ReadTxn, entMeta *structs.EnterpriseMeta) (memdb.Resul
 	return tx.Get("acl-auth-methods", "id")
 }
 
-func aclAuthMethodDeleteWithMethod(tx *txn, method *structs.ACLAuthMethod, idx uint64) error {
+func aclAuthMethodDeleteWithMethod(tx WriteTxn, method *structs.ACLAuthMethod, idx uint64) error {
 	// remove the method
 	if err := tx.Delete("acl-auth-methods", method); err != nil {
 		return fmt.Errorf("failed deleting acl auth method: %v", err)
@@ -286,7 +266,7 @@ func aclAuthMethodMaxIndex(tx ReadTxn, _ *structs.ACLAuthMethod, entMeta *struct
 	return maxIndexTxn(tx, "acl-auth-methods")
 }
 
-func aclAuthMethodUpsertValidateEnterprise(tx *txn, method *structs.ACLAuthMethod, existing *structs.ACLAuthMethod) error {
+func aclAuthMethodUpsertValidateEnterprise(_ ReadTxn, method *structs.ACLAuthMethod, existing *structs.ACLAuthMethod) error {
 	return nil
 }
 

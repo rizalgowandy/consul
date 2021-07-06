@@ -192,7 +192,16 @@ export const routes = {
           abilities: ['read auth-methods'],
         },
         show: {
-          _options: { path: '/show' },
+          _options: { path: '/:id' },
+          'auth-method': {
+            _options: { path: '/auth-method' },
+          },
+          'binding-rules': {
+            _options: { path: '/binding-rules' },
+          },
+          'nspace-rules': {
+            _options: { path: '/nspace-rules' },
+          },
         },
       },
     },
@@ -225,10 +234,6 @@ if (env('CONSUL_NSPACES_ENABLED')) {
         abilities: ['create nspaces'],
       },
     },
-  };
-  routes.nspace = {
-    _options: { path: '/:nspace' },
-    dc: routes.dc,
   };
 }
 runInDebug(() => {

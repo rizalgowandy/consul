@@ -1,8 +1,8 @@
 <Route
   @name={{routeName}}
+  @title='Consul'
+  @titleSeparator=" - "
 >
-<HeadLayout />
-{{page-title 'Consul' separator=' - '}}
 
 {{#if (env 'CONSUL_ACLS_ENABLED')}}
   {{document-attrs class="has-acls"}}
@@ -29,13 +29,18 @@ as |source|>
     @nspaces={{nspaces}}
     @nspace={{or nspace nspaces.firstObject}}
     @onchange={{action "reauthorize"}}
-  >
-  <Outlet
-  @name="application"
-  as |o|>
-    {{outlet}}
-  </Outlet>
-    <Consul::Loader class="view-loader" />
+  as |consul|>
+    <Outlet
+    @name="application"
+    @model={{hash
+      app=consul
+    }}
+    as |o|>
+      {{outlet}}
+    </Outlet>
+    <Consul::Loader
+      class="view-loader"
+    />
   </HashicorpConsul>
 {{/if}}
 </Route>

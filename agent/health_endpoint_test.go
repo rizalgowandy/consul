@@ -739,11 +739,16 @@ func TestHealthServiceNodes(t *testing.T) {
 
 func TestHealthServiceNodes_Blocking(t *testing.T) {
 	cases := []struct {
-		name        string
-		hcl         string
-		grpcMetrics bool
+		name         string
+		hcl          string
+		grpcMetrics  bool
+		queryBackend string
 	}{
-		{name: "no streaming"},
+		{
+			name:         "no streaming",
+			queryBackend: "blocking-query",
+			hcl:          `use_streaming_backend = false`,
+		},
 		{
 			name:        "streaming",
 			grpcMetrics: true,
@@ -751,6 +756,7 @@ func TestHealthServiceNodes_Blocking(t *testing.T) {
 rpc { enable_streaming = true }
 use_streaming_backend = true
 `,
+			queryBackend: "streaming",
 		},
 	}
 
@@ -856,6 +862,8 @@ use_streaming_backend = true
 				require.True(t, idx < newIdx, "index should have increased."+
 					"idx=%d, newIdx=%d", idx, newIdx)
 
+				require.Equal(t, tc.queryBackend, resp.Header().Get("X-Consul-Query-Backend"))
+
 				idx = newIdx
 
 				checkErrs()
@@ -882,6 +890,7 @@ use_streaming_backend = true
 
 				newIdx := getIndex(t, resp)
 				require.Equal(t, idx, newIdx)
+				require.Equal(t, tc.queryBackend, resp.Header().Get("X-Consul-Query-Backend"))
 			}
 
 			if tc.grpcMetrics {
@@ -905,16 +914,25 @@ func TestHealthServiceNodes_NodeMetaFilter(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		config string
+		name         string
+		config       string
+		queryBackend string
 	}{
-		{"normal", ""},
-		{"cache-with-streaming", `
+		{
+			name:         "blocking-query",
+			config:       `use_streaming_backend=false`,
+			queryBackend: "blocking-query",
+		},
+		{
+			name: "cache-with-streaming",
+			config: `
 			rpc{
 				enable_streaming=true
 			}
 			use_streaming_backend=true
-		    `},
+		    `,
+			queryBackend: "streaming",
+		},
 	}
 	for _, tst := range tests {
 		t.Run(tst.name, func(t *testing.T) {
@@ -986,6 +1004,8 @@ func TestHealthServiceNodes_NodeMetaFilter(t *testing.T) {
 			if len(nodes) != 1 || nodes[0].Checks == nil || len(nodes[0].Checks) != 0 {
 				t.Fatalf("bad: %v", obj)
 			}
+
+			require.Equal(t, tst.queryBackend, resp.Header().Get("X-Consul-Query-Backend"))
 		})
 	}
 }
@@ -1418,13 +1438,20 @@ func TestHealthConnectServiceNodes(t *testing.T) {
 }
 
 func TestHealthIngressServiceNodes(t *testing.T) {
+	t.Run("no streaming", func(t *testing.T) {
+		testHealthIngressServiceNodes(t, ` rpc { enable_streaming = false } use_streaming_backend = false `)
+	})
+	t.Run("cache with streaming", func(t *testing.T) {
+		testHealthIngressServiceNodes(t, ` rpc { enable_streaming = true } use_streaming_backend = true `)
+	})
+}
+
+func testHealthIngressServiceNodes(t *testing.T, agentHCL string) {
 	if testing.Short() {
 		t.Skip("too slow for testing.Short")
 	}
 
-	t.Parallel()
-
-	a := NewTestAgent(t, "")
+	a := NewTestAgent(t, agentHCL)
 	defer a.Shutdown()
 	testrpc.WaitForLeader(t, a.RPC, "dc1")
 
@@ -1461,34 +1488,68 @@ func TestHealthIngressServiceNodes(t *testing.T) {
 	require.Nil(t, a.RPC("ConfigEntry.Apply", req, &outB))
 	require.True(t, outB)
 
-	t.Run("associated service", func(t *testing.T) {
-		assert := assert.New(t)
-		req, _ := http.NewRequest("GET", fmt.Sprintf(
-			"/v1/health/ingress/%s", args.Service.Service), nil)
-		resp := httptest.NewRecorder()
-		obj, err := a.srv.HealthIngressServiceNodes(resp, req)
-		assert.Nil(err)
-		assertIndex(t, resp)
-
+	checkResults := func(t *testing.T, obj interface{}) {
 		nodes := obj.(structs.CheckServiceNodes)
 		require.Len(t, nodes, 1)
 		require.Equal(t, structs.ServiceKindIngressGateway, nodes[0].Service.Kind)
 		require.Equal(t, gatewayArgs.Service.Address, nodes[0].Service.Address)
 		require.Equal(t, gatewayArgs.Service.Proxy, nodes[0].Service.Proxy)
-	})
+	}
 
-	t.Run("non-associated service", func(t *testing.T) {
-		assert := assert.New(t)
+	require.True(t, t.Run("associated service", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", fmt.Sprintf(
+			"/v1/health/ingress/%s", args.Service.Service), nil)
+		resp := httptest.NewRecorder()
+		obj, err := a.srv.HealthIngressServiceNodes(resp, req)
+		require.NoError(t, err)
+		assertIndex(t, resp)
+
+		checkResults(t, obj)
+	}))
+
+	require.True(t, t.Run("non-associated service", func(t *testing.T) {
 		req, _ := http.NewRequest("GET",
 			"/v1/health/connect/notexist", nil)
 		resp := httptest.NewRecorder()
 		obj, err := a.srv.HealthIngressServiceNodes(resp, req)
-		assert.Nil(err)
+		require.NoError(t, err)
 		assertIndex(t, resp)
 
 		nodes := obj.(structs.CheckServiceNodes)
 		require.Len(t, nodes, 0)
-	})
+	}))
+
+	require.True(t, t.Run("test caching miss", func(t *testing.T) {
+		// List instances with cache enabled
+		req, _ := http.NewRequest("GET", fmt.Sprintf(
+			"/v1/health/ingress/%s?cached", args.Service.Service), nil)
+		resp := httptest.NewRecorder()
+		obj, err := a.srv.HealthIngressServiceNodes(resp, req)
+		require.NoError(t, err)
+
+		checkResults(t, obj)
+
+		// Should be a cache miss
+		require.Equal(t, "MISS", resp.Header().Get("X-Cache"))
+		// always a blocking query, because the ingress endpoint does not yet support streaming.
+		require.Equal(t, "blocking-query", resp.Header().Get("X-Consul-Query-Backend"))
+	}))
+
+	require.True(t, t.Run("test caching hit", func(t *testing.T) {
+		// List instances with cache enabled
+		req, _ := http.NewRequest("GET", fmt.Sprintf(
+			"/v1/health/ingress/%s?cached", args.Service.Service), nil)
+		resp := httptest.NewRecorder()
+		obj, err := a.srv.HealthIngressServiceNodes(resp, req)
+		require.NoError(t, err)
+
+		checkResults(t, obj)
+
+		// Should be a cache HIT now!
+		require.Equal(t, "HIT", resp.Header().Get("X-Cache"))
+		// always a blocking query, because the ingress endpoint does not yet support streaming.
+		require.Equal(t, "blocking-query", resp.Header().Get("X-Consul-Query-Backend"))
+	}))
 }
 
 func TestHealthConnectServiceNodes_Filter(t *testing.T) {

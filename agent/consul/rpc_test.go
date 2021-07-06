@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -11,6 +13,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/go-memdb"
+	msgpackrpc "github.com/hashicorp/net-rpc-msgpackrpc"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/consul/state"
@@ -20,10 +27,6 @@ import (
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/sdk/testutil/retry"
 	"github.com/hashicorp/consul/testrpc"
-	"github.com/hashicorp/go-memdb"
-	msgpackrpc "github.com/hashicorp/net-rpc-msgpackrpc"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRPC_NoLeader_Fail(t *testing.T) {
@@ -951,4 +954,111 @@ func TestRPC_LocalTokenStrippedOnForward(t *testing.T) {
 	err = msgpackrpc.CallWithCodec(codec2, "KVS.Apply", &arg, &out)
 	require.NoError(t, err)
 	require.Equal(t, localToken2.SecretID, arg.WriteRequest.Token, "token should not be stripped")
+}
+
+func TestCanRetry(t *testing.T) {
+	type testCase struct {
+		name     string
+		req      structs.RPCInfo
+		err      error
+		expected bool
+		timeout  time.Time
+	}
+	config := DefaultConfig()
+	now := time.Now()
+	config.RPCHoldTimeout = 7 * time.Second
+	run := func(t *testing.T, tc testCase) {
+		timeOutValue := tc.timeout
+		if timeOutValue.IsZero() {
+			timeOutValue = now
+		}
+		require.Equal(t, tc.expected, canRetry(tc.req, tc.err, timeOutValue, config))
+	}
+
+	var testCases = []testCase{
+		{
+			name:     "unexpected error",
+			err:      fmt.Errorf("some arbitrary error"),
+			expected: false,
+		},
+		{
+			name:     "checking error",
+			err:      fmt.Errorf("some wrapping :%w", ErrChunkingResubmit),
+			expected: true,
+		},
+		{
+			name:     "no leader error",
+			err:      fmt.Errorf("some wrapping: %w", structs.ErrNoLeader),
+			expected: true,
+		},
+		{
+			name:     "EOF on read request",
+			req:      isReadRequest{},
+			err:      io.EOF,
+			expected: true,
+		},
+		{
+			name:     "EOF error",
+			req:      &structs.DCSpecificRequest{},
+			err:      io.EOF,
+			expected: true,
+		},
+		{
+			name:     "HasTimedOut implementation with no error",
+			req:      &structs.DCSpecificRequest{},
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "HasTimedOut implementation timedOut with no error",
+			req:      &structs.DCSpecificRequest{},
+			err:      nil,
+			expected: false,
+			timeout:  now.Add(-(config.RPCHoldTimeout + time.Second)),
+		},
+		{
+			name:     "HasTimedOut implementation timedOut (with EOF error)",
+			req:      &structs.DCSpecificRequest{},
+			err:      io.EOF,
+			expected: false,
+			timeout:  now.Add(-(config.RPCHoldTimeout + time.Second)),
+		},
+		{
+			name:     "HasTimedOut implementation timedOut blocking call",
+			req:      &structs.DCSpecificRequest{QueryOptions: structs.QueryOptions{MaxQueryTime: 300, MinQueryIndex: 1}},
+			err:      nil,
+			expected: false,
+			timeout:  now.Add(-(config.RPCHoldTimeout + config.MaxQueryTime + time.Second)),
+		},
+		{
+			name:     "HasTimedOut implementation timedOut blocking call (MaxQueryTime not set)",
+			req:      &structs.DCSpecificRequest{QueryOptions: structs.QueryOptions{MinQueryIndex: 1}},
+			err:      nil,
+			expected: false,
+			timeout:  now.Add(-(config.RPCHoldTimeout + config.MaxQueryTime + time.Second)),
+		},
+		{
+			name:     "EOF on write request",
+			err:      io.EOF,
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			run(t, tc)
+		})
+	}
+}
+
+type isReadRequest struct {
+	structs.RPCInfo
+}
+
+func (r isReadRequest) IsRead() bool {
+	return true
+}
+
+func (r isReadRequest) HasTimedOut(since time.Time, rpcHoldTimeout, maxQueryTime, defaultQueryTime time.Duration) bool {
+	return false
 }

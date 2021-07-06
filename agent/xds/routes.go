@@ -16,23 +16,24 @@ import (
 	"github.com/hashicorp/consul/agent/connect"
 	"github.com/hashicorp/consul/agent/proxycfg"
 	"github.com/hashicorp/consul/agent/structs"
-	"github.com/hashicorp/consul/logging"
 )
 
 // routesFromSnapshot returns the xDS API representation of the "routes" in the
 // snapshot.
-func (s *Server) routesFromSnapshot(cInfo connectionInfo, cfgSnap *proxycfg.ConfigSnapshot) ([]proto.Message, error) {
+func (s *ResourceGenerator) routesFromSnapshot(cfgSnap *proxycfg.ConfigSnapshot) ([]proto.Message, error) {
 	if cfgSnap == nil {
 		return nil, errors.New("nil config given")
 	}
 
 	switch cfgSnap.Kind {
 	case structs.ServiceKindConnectProxy:
-		return routesForConnectProxy(cInfo, cfgSnap.Proxy.Upstreams, cfgSnap.ConnectProxy.DiscoveryChain)
+		return s.routesForConnectProxy(cfgSnap.ConnectProxy.DiscoveryChain)
 	case structs.ServiceKindIngressGateway:
-		return routesForIngressGateway(cInfo, cfgSnap.IngressGateway.Upstreams, cfgSnap.IngressGateway.DiscoveryChain)
+		return s.routesForIngressGateway(cfgSnap.IngressGateway.Upstreams, cfgSnap.IngressGateway.DiscoveryChain)
 	case structs.ServiceKindTerminatingGateway:
-		return s.routesFromSnapshotTerminatingGateway(cInfo, cfgSnap)
+		return s.routesFromSnapshotTerminatingGateway(cfgSnap)
+	case structs.ServiceKindMeshGateway:
+		return nil, nil // mesh gateways will never have routes
 	default:
 		return nil, fmt.Errorf("Invalid service kind: %v", cfgSnap.Kind)
 	}
@@ -40,39 +41,27 @@ func (s *Server) routesFromSnapshot(cInfo connectionInfo, cfgSnap *proxycfg.Conf
 
 // routesFromSnapshotConnectProxy returns the xDS API representation of the
 // "routes" in the snapshot.
-func routesForConnectProxy(
-	cInfo connectionInfo,
-	upstreams structs.Upstreams,
-	chains map[string]*structs.CompiledDiscoveryChain,
-) ([]proto.Message, error) {
-
+func (s *ResourceGenerator) routesForConnectProxy(chains map[string]*structs.CompiledDiscoveryChain) ([]proto.Message, error) {
 	var resources []proto.Message
-	for _, u := range upstreams {
-		upstreamID := u.Identifier()
-
-		var chain *structs.CompiledDiscoveryChain
-		if u.DestinationType != structs.UpstreamDestTypePreparedQuery {
-			chain = chains[upstreamID]
+	for id, chain := range chains {
+		if chain.IsDefault() {
+			continue
 		}
 
-		if chain == nil || chain.IsDefault() {
-			// TODO(rb): make this do the old school stuff too
-		} else {
-			virtualHost, err := makeUpstreamRouteForDiscoveryChain(cInfo, upstreamID, chain, []string{"*"})
-			if err != nil {
-				return nil, err
-			}
-
-			route := &envoy_route_v3.RouteConfiguration{
-				Name:         upstreamID,
-				VirtualHosts: []*envoy_route_v3.VirtualHost{virtualHost},
-				// ValidateClusters defaults to true when defined statically and false
-				// when done via RDS. Re-set the sane value of true to prevent
-				// null-routing traffic.
-				ValidateClusters: makeBoolValue(true),
-			}
-			resources = append(resources, route)
+		virtualHost, err := makeUpstreamRouteForDiscoveryChain(id, chain, []string{"*"})
+		if err != nil {
+			return nil, err
 		}
+
+		route := &envoy_route_v3.RouteConfiguration{
+			Name:         id,
+			VirtualHosts: []*envoy_route_v3.VirtualHost{virtualHost},
+			// ValidateClusters defaults to true when defined statically and false
+			// when done via RDS. Re-set the sane value of true to prevent
+			// null-routing traffic.
+			ValidateClusters: makeBoolValue(true),
+		}
+		resources = append(resources, route)
 	}
 
 	// TODO(rb): make sure we don't generate an empty result
@@ -81,11 +70,10 @@ func routesForConnectProxy(
 
 // routesFromSnapshotTerminatingGateway returns the xDS API representation of the "routes" in the snapshot.
 // For any HTTP service we will return a default route.
-func (s *Server) routesFromSnapshotTerminatingGateway(_ connectionInfo, cfgSnap *proxycfg.ConfigSnapshot) ([]proto.Message, error) {
+func (s *ResourceGenerator) routesFromSnapshotTerminatingGateway(cfgSnap *proxycfg.ConfigSnapshot) ([]proto.Message, error) {
 	if cfgSnap == nil {
 		return nil, errors.New("nil config given")
 	}
-	logger := s.Logger.Named(logging.TerminatingGateway)
 
 	var resources []proto.Message
 	for _, svc := range cfgSnap.TerminatingGateway.ValidServices() {
@@ -112,9 +100,9 @@ func (s *Server) routesFromSnapshotTerminatingGateway(_ connectionInfo, cfgSnap 
 		if resolver.LoadBalancer != nil {
 			lb = resolver.LoadBalancer
 		}
-		route, err := makeNamedDefaultRouteWithLB(clusterName, lb)
+		route, err := makeNamedDefaultRouteWithLB(clusterName, lb, true)
 		if err != nil {
-			logger.Error("failed to make route", "cluster", clusterName, "error", err)
+			s.Logger.Error("failed to make route", "cluster", clusterName, "error", err)
 			continue
 		}
 		resources = append(resources, route)
@@ -122,9 +110,9 @@ func (s *Server) routesFromSnapshotTerminatingGateway(_ connectionInfo, cfgSnap 
 		// If there is a service-resolver for this service then also setup routes for each subset
 		for name := range resolver.Subsets {
 			clusterName = connect.ServiceSNI(svc.Name, name, svc.NamespaceOrDefault(), cfgSnap.Datacenter, cfgSnap.Roots.TrustDomain)
-			route, err := makeNamedDefaultRouteWithLB(clusterName, lb)
+			route, err := makeNamedDefaultRouteWithLB(clusterName, lb, true)
 			if err != nil {
-				logger.Error("failed to make route", "cluster", clusterName, "error", err)
+				s.Logger.Error("failed to make route", "cluster", clusterName, "error", err)
 				continue
 			}
 			resources = append(resources, route)
@@ -134,11 +122,18 @@ func (s *Server) routesFromSnapshotTerminatingGateway(_ connectionInfo, cfgSnap 
 	return resources, nil
 }
 
-func makeNamedDefaultRouteWithLB(clusterName string, lb *structs.LoadBalancer) (*envoy_route_v3.RouteConfiguration, error) {
+func makeNamedDefaultRouteWithLB(clusterName string, lb *structs.LoadBalancer, autoHostRewrite bool) (*envoy_route_v3.RouteConfiguration, error) {
 	action := makeRouteActionFromName(clusterName)
 
 	if err := injectLBToRouteAction(lb, action.Route); err != nil {
 		return nil, fmt.Errorf("failed to apply load balancer configuration to route action: %v", err)
+	}
+
+	// Configure Envoy to rewrite Host header
+	if autoHostRewrite {
+		action.Route.HostRewriteSpecifier = &envoy_route_v3.RouteAction_AutoHostRewrite{
+			AutoHostRewrite: makeBoolValue(true),
+		}
 	}
 
 	return &envoy_route_v3.RouteConfiguration{
@@ -164,8 +159,7 @@ func makeNamedDefaultRouteWithLB(clusterName string, lb *structs.LoadBalancer) (
 
 // routesForIngressGateway returns the xDS API representation of the
 // "routes" in the snapshot.
-func routesForIngressGateway(
-	cInfo connectionInfo,
+func (s *ResourceGenerator) routesForIngressGateway(
 	upstreams map[proxycfg.IngressListenerKey]structs.Upstreams,
 	chains map[string]*structs.CompiledDiscoveryChain,
 ) ([]proto.Message, error) {
@@ -192,7 +186,7 @@ func routesForIngressGateway(
 			}
 
 			domains := generateUpstreamIngressDomains(listenerKey, u)
-			virtualHost, err := makeUpstreamRouteForDiscoveryChain(cInfo, upstreamID, chain, domains)
+			virtualHost, err := makeUpstreamRouteForDiscoveryChain(upstreamID, chain, domains)
 			if err != nil {
 				return nil, err
 			}
@@ -252,7 +246,6 @@ func generateUpstreamIngressDomains(listenerKey proxycfg.IngressListenerKey, u s
 }
 
 func makeUpstreamRouteForDiscoveryChain(
-	cInfo connectionInfo,
 	routeName string,
 	chain *structs.CompiledDiscoveryChain,
 	serviceDomains []string,
@@ -269,7 +262,7 @@ func makeUpstreamRouteForDiscoveryChain(
 		routes = make([]*envoy_route_v3.Route, 0, len(startNode.Routes))
 
 		for _, discoveryRoute := range startNode.Routes {
-			routeMatch := makeRouteMatchForDiscoveryRoute(cInfo, discoveryRoute)
+			routeMatch := makeRouteMatchForDiscoveryRoute(discoveryRoute)
 
 			var (
 				routeAction *envoy_route_v3.Route_Route
@@ -398,7 +391,7 @@ func makeUpstreamRouteForDiscoveryChain(
 	return host, nil
 }
 
-func makeRouteMatchForDiscoveryRoute(_ connectionInfo, discoveryRoute *structs.DiscoveryRoute) *envoy_route_v3.RouteMatch {
+func makeRouteMatchForDiscoveryRoute(discoveryRoute *structs.DiscoveryRoute) *envoy_route_v3.RouteMatch {
 	match := discoveryRoute.Definition.Match
 	if match == nil || match.IsEmpty() {
 		return makeDefaultRouteMatch()

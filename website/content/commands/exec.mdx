@@ -1,7 +1,6 @@
 ---
 layout: commands
 page_title: 'Commands: Exec'
-sidebar_title: exec
 description: >-
   The exec command provides a mechanism for remote execution. For example, this
   can be used to run the `uptime` command across all machines providing the
@@ -40,6 +39,8 @@ execute this command.
 | `session:write` | local agent       |
 | `key:write`     | `"_rexec"` prefix |
 | `event:write`   | `"_rexec"` prefix |
+
+In addition to the above, the policy associated with the [agent token](https://www.consul.io/docs/security/acl/acl-system#acl-agent-token) should have `write` on `"_rexec"` key prefix. This is for the agents to read the `exec` command and write its output back to the KV store.
 
 ## Usage
 

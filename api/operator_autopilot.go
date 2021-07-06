@@ -58,6 +58,23 @@ type AutopilotConfiguration struct {
 	ModifyIndex uint64
 }
 
+// Defines default values for the AutopilotConfiguration type, consistent with
+// https://www.consul.io/api-docs/operator/autopilot#parameters-1
+func NewAutopilotConfiguration() AutopilotConfiguration {
+	cfg := AutopilotConfiguration{
+		CleanupDeadServers:      true,
+		LastContactThreshold:    NewReadableDuration(200 * time.Millisecond),
+		MaxTrailingLogs:         250,
+		MinQuorum:               0,
+		ServerStabilizationTime: NewReadableDuration(10 * time.Second),
+		RedundancyZoneTag:       "",
+		DisableUpgradeMigration: false,
+		UpgradeVersionTag:       "",
+	}
+
+	return cfg
+}
+
 // ServerHealth is the health (from the leader's point of view) of a server.
 type ServerHealth struct {
 	// ID is the raft ID of the server.
@@ -284,7 +301,7 @@ func (op *Operator) AutopilotGetConfiguration(q *QueryOptions) (*AutopilotConfig
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp)
 
 	var out AutopilotConfiguration
 	if err := decodeBody(resp, &out); err != nil {
@@ -303,7 +320,7 @@ func (op *Operator) AutopilotSetConfiguration(conf *AutopilotConfiguration, q *W
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	closeResponseBody(resp)
 	return nil
 }
 
@@ -319,7 +336,7 @@ func (op *Operator) AutopilotCASConfiguration(conf *AutopilotConfiguration, q *W
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp)
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, resp.Body); err != nil {
@@ -340,7 +357,7 @@ func (op *Operator) AutopilotServerHealth(q *QueryOptions) (*OperatorHealthReply
 	_, resp, err := op.c.doRequest(r)
 	if err != nil {
 		if resp != nil {
-			resp.Body.Close()
+			closeResponseBody(resp)
 		}
 		return nil, err
 	}
@@ -351,7 +368,7 @@ func (op *Operator) AutopilotServerHealth(q *QueryOptions) (*OperatorHealthReply
 		return nil, generateUnexpectedResponseCodeError(resp)
 	}
 
-	defer resp.Body.Close()
+	defer closeResponseBody(resp)
 
 	var out OperatorHealthReply
 	if err := decodeBody(resp, &out); err != nil {
@@ -367,7 +384,7 @@ func (op *Operator) AutopilotState(q *QueryOptions) (*AutopilotState, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(resp)
 
 	var out AutopilotState
 	if err := decodeBody(resp, &out); err != nil {

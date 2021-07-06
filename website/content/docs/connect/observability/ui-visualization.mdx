@@ -1,7 +1,6 @@
 ---
 layout: docs
 page_title: Connect - UI Visualization
-sidebar_title: UI Visualization
 description: |-
   This page describes how to set up and customize the Service Mesh Topology
   visualization in Consul's UI.
@@ -32,6 +31,10 @@ Consul has built-in support for overlaying metrics from a
 [Prometheus](https://prometheus.io) backend. Alternative metrics providers may
 be supported using a new and experimental JavaScript API. See [Custom Metrics
 Providers](#custom-metrics-providers).
+
+## Kubernetes
+If running Consul in Kubernetes, the Helm chart can automatically configure Consul's UI to display topology
+visualizations. See our [Kubernetes observability docs](/docs/k8s/connect/observability/metrics) for more information.
 
 ## Configuring the UI To Display Metrics
 
@@ -69,6 +72,8 @@ ui_config {
   }
 }
 ```
+
+Similarly, to configure the UI on Kubernetes, use this [reference](/docs/k8s/connect/observability/metrics).
 
 ## Configuring Dashboard URLs
 

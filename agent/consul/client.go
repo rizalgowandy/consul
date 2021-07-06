@@ -115,7 +115,7 @@ func NewClient(config *Config, deps Deps) (*Client, error) {
 
 	c.rpcLimiter.Store(rate.NewLimiter(config.RPCRateLimit, config.RPCMaxBurst))
 
-	if err := c.initEnterprise(); err != nil {
+	if err := c.initEnterprise(deps); err != nil {
 		c.Shutdown()
 		return nil, err
 	}
@@ -128,6 +128,7 @@ func NewClient(config *Config, deps Deps) (*Client, error) {
 		AutoDisable: true,
 		CacheConfig: clientACLCacheConfig,
 		ACLConfig:   newACLConfig(c.logger),
+		Tokens:      deps.Tokens,
 	}
 	var err error
 	if c.acls, err = NewACLResolver(&aclConfig); err != nil {
@@ -156,11 +157,6 @@ func NewClient(config *Config, deps Deps) (*Client, error) {
 	// condition where the router manager is used when the pointer is nil
 	if c.acls.ACLsEnabled() {
 		go c.monitorACLMode()
-	}
-
-	if err := c.startEnterprise(); err != nil {
-		c.Shutdown()
-		return nil, err
 	}
 
 	return c, nil
@@ -286,18 +282,19 @@ TRY:
 	)
 	metrics.IncrCounterWithLabels([]string{"client", "rpc", "failed"}, 1, []metrics.Label{{Name: "server", Value: server.Name}})
 	manager.NotifyFailedServer(server)
-	if retry := canRetry(args, rpcErr); !retry {
+
+	// Use the zero value for RPCInfo if the request doesn't implement RPCInfo
+	info, _ := args.(structs.RPCInfo)
+	if retry := canRetry(info, rpcErr, firstCheck, c.config); !retry {
 		return rpcErr
 	}
 
 	// We can wait a bit and retry!
-	if time.Since(firstCheck) < c.config.RPCHoldTimeout {
-		jitter := lib.RandomStagger(c.config.RPCHoldTimeout / jitterFraction)
-		select {
-		case <-time.After(jitter):
-			goto TRY
-		case <-c.shutdownCh:
-		}
+	jitter := lib.RandomStagger(c.config.RPCHoldTimeout / structs.JitterFraction)
+	select {
+	case <-time.After(jitter):
+		goto TRY
+	case <-c.shutdownCh:
 	}
 	return rpcErr
 }
@@ -374,16 +371,6 @@ func (c *Client) Stats() map[string]map[string]string {
 		}
 	} else {
 		stats["consul"]["acl"] = "disabled"
-	}
-
-	for outerKey, outerValue := range c.enterpriseStats() {
-		if _, ok := stats[outerKey]; ok {
-			for innerKey, innerValue := range outerValue {
-				stats[outerKey][innerKey] = innerValue
-			}
-		} else {
-			stats[outerKey] = outerValue
-		}
 	}
 
 	return stats

@@ -8,10 +8,19 @@ export default class RouteComponent extends Component {
 
   @tracked model;
 
+  get title() {
+    return this.args.title;
+  }
+
+  get params() {
+    return this.routlet.paramsFor(this.args.name);
+  }
+
   @action
   connect() {
     this.routlet.addRoute(this.args.name, this);
   }
+
   @action
   disconnect() {
     this.routlet.removeRoute(this.args.name, this);

@@ -6,10 +6,11 @@ import (
 
 	"github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
+	"github.com/hashicorp/go-hclog"
+
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/api"
-	"github.com/hashicorp/go-hclog"
 )
 
 var TxnSummaries = []prometheus.SummaryDefinition{
@@ -120,7 +121,7 @@ func (t *Txn) preCheck(authorizer acl.Authorizer, ops structs.TxnOps) structs.Tx
 
 // Apply is used to apply multiple operations in a single, atomic transaction.
 func (t *Txn) Apply(args *structs.TxnRequest, reply *structs.TxnResponse) error {
-	if done, err := t.srv.ForwardRPC("Txn.Apply", args, args, reply); done {
+	if done, err := t.srv.ForwardRPC("Txn.Apply", args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"txn", "apply"}, time.Now())
@@ -138,11 +139,7 @@ func (t *Txn) Apply(args *structs.TxnRequest, reply *structs.TxnResponse) error 
 	// Apply the update.
 	resp, err := t.srv.raftApply(structs.TxnRequestType, args)
 	if err != nil {
-		t.logger.Error("Raft apply failed", "error", err)
-		return err
-	}
-	if respErr, ok := resp.(error); ok {
-		return respErr
+		return fmt.Errorf("raft apply failed: %w", err)
 	}
 
 	// Convert the return type. This should be a cheap copy since we are
@@ -163,7 +160,7 @@ func (t *Txn) Apply(args *structs.TxnRequest, reply *structs.TxnResponse) error 
 // supports staleness, so this should be preferred if you're just performing
 // reads.
 func (t *Txn) Read(args *structs.TxnReadRequest, reply *structs.TxnReadResponse) error {
-	if done, err := t.srv.ForwardRPC("Txn.Read", args, args, reply); done {
+	if done, err := t.srv.ForwardRPC("Txn.Read", args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"txn", "read"}, time.Now())

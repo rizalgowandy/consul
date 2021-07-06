@@ -1,5 +1,11 @@
 {{did-insert this.connect}}
 {{will-destroy this.disconnect}}
+
+{{#if this.title}}
+  {{page-title this.title separator=@titleSeparator}}
+{{/if}}
+
 {{yield (hash
-  model=model
+  model=this.model
+  params=this.params
 )}}

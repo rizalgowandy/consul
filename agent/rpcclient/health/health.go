@@ -5,13 +5,18 @@ import (
 
 	"github.com/hashicorp/consul/agent/cache"
 	"github.com/hashicorp/consul/agent/structs"
+	"github.com/hashicorp/consul/agent/submatview"
+	"github.com/hashicorp/consul/proto/pbsubscribe"
 )
 
+// Client provides access to service health data.
 type Client struct {
-	NetRPC NetRPC
-	Cache  CacheGetter
-	// CacheName to use for service health.
-	CacheName string
+	NetRPC              NetRPC
+	Cache               CacheGetter
+	ViewStore           MaterializedViewStore
+	MaterializerDeps    MaterializerDeps
+	CacheName           string
+	UseStreamingBackend bool
 }
 
 type NetRPC interface {
@@ -23,10 +28,24 @@ type CacheGetter interface {
 	Notify(ctx context.Context, t string, r cache.Request, cID string, ch chan<- cache.UpdateEvent) error
 }
 
+type MaterializedViewStore interface {
+	Get(ctx context.Context, req submatview.Request) (submatview.Result, error)
+	Notify(ctx context.Context, req submatview.Request, cID string, ch chan<- cache.UpdateEvent) error
+}
+
 func (c *Client) ServiceNodes(
 	ctx context.Context,
 	req structs.ServiceSpecificRequest,
 ) (structs.IndexedCheckServiceNodes, cache.ResultMeta, error) {
+	if c.useStreaming(req) && (req.QueryOptions.UseCache || req.QueryOptions.MinQueryIndex > 0) {
+		result, err := c.ViewStore.Get(ctx, c.newServiceRequest(req))
+		if err != nil {
+			return structs.IndexedCheckServiceNodes{}, cache.ResultMeta{}, err
+		}
+		meta := cache.ResultMeta{Index: result.Index, Hit: result.Cached}
+		return *result.Value.(*structs.IndexedCheckServiceNodes), meta, err
+	}
+
 	out, md, err := c.getServiceNodes(ctx, req)
 	if err != nil {
 		return out, md, err
@@ -47,7 +66,6 @@ func (c *Client) getServiceNodes(
 	req structs.ServiceSpecificRequest,
 ) (structs.IndexedCheckServiceNodes, cache.ResultMeta, error) {
 	var out structs.IndexedCheckServiceNodes
-
 	if !req.QueryOptions.UseCache {
 		err := c.NetRPC.RPC("Health.ServiceNodes", &req, &out)
 		return out, cache.ResultMeta{}, err
@@ -72,5 +90,55 @@ func (c *Client) Notify(
 	correlationID string,
 	ch chan<- cache.UpdateEvent,
 ) error {
+	if c.useStreaming(req) {
+		sr := c.newServiceRequest(req)
+		return c.ViewStore.Notify(ctx, sr, correlationID, ch)
+	}
+
 	return c.Cache.Notify(ctx, c.CacheName, &req, correlationID, ch)
+}
+
+func (c *Client) useStreaming(req structs.ServiceSpecificRequest) bool {
+	return c.UseStreamingBackend && !req.Ingress && req.Source.Node == ""
+}
+
+func (c *Client) newServiceRequest(req structs.ServiceSpecificRequest) serviceRequest {
+	return serviceRequest{
+		ServiceSpecificRequest: req,
+		deps:                   c.MaterializerDeps,
+	}
+}
+
+// Close any underlying connections used by the client.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	return c.MaterializerDeps.Conn.Close()
+}
+
+type serviceRequest struct {
+	structs.ServiceSpecificRequest
+	deps MaterializerDeps
+}
+
+func (r serviceRequest) CacheInfo() cache.RequestInfo {
+	return r.ServiceSpecificRequest.CacheInfo()
+}
+
+func (r serviceRequest) Type() string {
+	return "agent.rpcclient.health.serviceRequest"
+}
+
+func (r serviceRequest) NewMaterializer() (*submatview.Materializer, error) {
+	view, err := newHealthView(r.ServiceSpecificRequest)
+	if err != nil {
+		return nil, err
+	}
+	return submatview.NewMaterializer(submatview.Deps{
+		View:    view,
+		Client:  pbsubscribe.NewStateChangeSubscriptionClient(r.deps.Conn),
+		Logger:  r.deps.Logger,
+		Request: newMaterializerRequest(r.ServiceSpecificRequest),
+	}), nil
 }
